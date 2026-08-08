@@ -103,7 +103,6 @@ def _jaccard(before_norm: str, after_norm: str) -> float:
 
 # ---- T2: deterministic rule discriminator ---------------------------------------------
 
-_ALL_CAUSE_TOKENS = frozenset({"all", "cause"})
 _NARROWING_QUALIFIERS = frozenset(
     {
         "cardiovascular", "cardiac", "cancer", "oncologic", "respiratory",
@@ -112,21 +111,52 @@ _NARROWING_QUALIFIERS = frozenset(
 )
 
 
+def _content_tokens(text_norm: str) -> list[str]:
+    """Stopword-filtered tokens, order preserved -- used to find the real semantic
+    head noun (the last *content* word), not whatever non-stopword-but-still-generic
+    word (e.g. "baseline", "dosing") happens to land last in the raw string."""
+    return [w for w in text_norm.split() if w not in _STOPWORDS]
+
+
 def _qualifier_relation(before_stem_norm: str, after_stem_norm: str) -> str | None:
-    tb, ta = before_stem_norm.split(), after_stem_norm.split()
+    tb, ta = _content_tokens(before_stem_norm), _content_tokens(after_stem_norm)
     if not tb or not ta or tb[-1] != ta[-1]:
         return None  # no shared head noun -> not a qualifier-narrowing case at all
-    head = tb[-1]
     qualifiers_b, qualifiers_a = set(tb[:-1]), set(ta[:-1])
-    if qualifiers_b == _ALL_CAUSE_TOKENS and qualifiers_a & _NARROWING_QUALIFIERS:
+    added = qualifiers_a - qualifiers_b
+    removed = qualifiers_b - qualifiers_a
+    added_restrictive = bool(added & _NARROWING_QUALIFIERS)
+    removed_restrictive = bool(removed & _NARROWING_QUALIFIERS)
+    # Generic token-subset/superset, on its own, is NOT evidence of narrowing: an
+    # abbreviation-expansion artifact ("A1C" -> "Hemoglobin A1c (A1C)") or an added
+    # but unrelated measured parameter (physical exam -> +vital signs +labs +ECG,
+    # which BROADENS what's monitored -- the opposite of narrowing) looks identical
+    # to a genuine qualifier restriction under pure set comparison (verified against
+    # real corpus false positives, see v03-review.md Critical #1). Only fire when the
+    # actual differing word(s) are in the curated restrictive-qualifier lexicon;
+    # anything else escalates instead of guessing a direction.
+    if added_restrictive and not removed_restrictive:
         return "NARROWED"
-    if qualifiers_a == _ALL_CAUSE_TOKENS and qualifiers_b & _NARROWING_QUALIFIERS:
-        return "BROADENED"
-    if qualifiers_b < qualifiers_a:  # after inserted extra qualifier word(s)
-        return "NARROWED"
-    if qualifiers_a < qualifiers_b:  # after dropped qualifier word(s) before had
+    if removed_restrictive and not added_restrictive:
         return "BROADENED"
     return None
+
+
+_ACRONYM_RE = re.compile(r"\b[A-Z]{2,8}\b")
+
+
+def _shares_acronym(before_raw: str, after_raw: str) -> bool:
+    """True if an all-caps acronym in one raw measure string also appears (verbatim,
+    case-sensitive) in the other -- the abbreviation-spell-out signature ("MACE" ...
+    "major adverse cardiac event (MACE)", "A1C" ... "Hemoglobin A1c (A1C)"). Caught
+    live in the corpus after the lexicon fix: "cardiac" is a genuine restrictive
+    qualifier *and* part of MACE's own expansion, so the lexicon check alone still
+    misread that spell-out as narrowing. Checked on raw (pre-norm) text since
+    norm() lowercases everything -- acronym-ness is a case signal that doesn't
+    survive normalisation."""
+    before_acronyms = set(_ACRONYM_RE.findall(before_raw))
+    after_acronyms = set(_ACRONYM_RE.findall(after_raw))
+    return bool(before_acronyms & after_acronyms)
 
 
 def _t2_rules(before: OutcomeRow, after: OutcomeRow) -> str | None:
@@ -136,6 +166,9 @@ def _t2_rules(before: OutcomeRow, after: OutcomeRow) -> str | None:
 
     if tp_b != tp_a and stem_b_norm == stem_a_norm:
         return "TIMEPOINT_CHANGED"
+
+    if _shares_acronym(stem_b, stem_a):
+        return None  # shared acronym -> an expansion artifact, not a real qualifier change
 
     return _qualifier_relation(stem_b_norm, stem_a_norm)
 

@@ -11,10 +11,10 @@ pair is the same underlying measure, related this way" and pairs them; "DIFFEREN
 or None means no match, and the record stays a candidate for ADDED/REMOVED.
 The relation a matcher returns for a matched pair drives its RawChange kind
 (see _classify_matched_pair): REWORDED -> REWORDED, NARROWED -> NARROWED,
-TIMEPOINT_CHANGED -> TIMEPOINT; SAME/BROADENED fall through to re-deriving the
-kind from outcome_type/raw-text/time_frame, since T0 (which only ever returns
-SAME or None) still needs to detect its own free case-only rewording and
-timepoint-only changes that way. t0_matcher below emits SAME/None only --
+BROADENED -> BROADENED, TIMEPOINT_CHANGED -> TIMEPOINT; SAME falls through to
+re-deriving the kind from outcome_type/raw-text/time_frame, since T0 (which only
+ever returns SAME or None) still needs to detect its own free case-only rewording
+and timepoint-only changes that way. t0_matcher below emits SAME/None only --
 behaviour today is unchanged, v0.3's cascade slots in as a drop-in replacement.
 """
 
@@ -41,7 +41,7 @@ class OutcomeRow:
 
 @dataclass(frozen=True)
 class RawChange:
-    kind: str  # ADDED / REMOVED / REPLACED / DEMOTED / PROMOTED / TIMEPOINT / REWORDED
+    kind: str  # ADDED / REMOVED / REPLACED / DEMOTED / PROMOTED / TIMEPOINT / REWORDED / NARROWED / BROADENED
     before: OutcomeRow | None
     after: OutcomeRow | None
 
@@ -63,6 +63,16 @@ class Finding:
 
 
 _MATCH_RELATIONS = {"SAME", "REWORDED", "NARROWED", "BROADENED", "TIMEPOINT_CHANGED"}
+
+# Tiers where the cascade explicitly could not adjudicate the pair -- T2_UNRESOLVED
+# ("didn't look": no T3 budget) and T3_FALLBACK ("looked and failed": CLI error/
+# timeout/malformed response). Findings resolved at either ride the same
+# REPLACED/ADDED/REMOVED collapse as a confidently-resolved pair, so confidence is
+# the only signal distinguishing "the cascade confirmed this" from "the cascade
+# never actually adjudicated this" -- full 1.0 confidence on an unresolved match
+# would be indistinguishable from a real one downstream.
+_UNRESOLVED_TIERS = {"T2_UNRESOLVED", "T3_FALLBACK"}
+_UNRESOLVED_CONFIDENCE = 0.5
 
 
 def t0_matcher(before: OutcomeRow, after: OutcomeRow) -> str | None:
@@ -86,11 +96,13 @@ def _classify_matched_pair(before: OutcomeRow, after: OutcomeRow, relation: str)
 
     if relation == "NARROWED":
         return RawChange("NARROWED", before, after)
+    if relation == "BROADENED":
+        return RawChange("BROADENED", before, after)
     if relation == "TIMEPOINT_CHANGED":
         return RawChange("TIMEPOINT", before, after)
-    # SAME/REWORDED/BROADENED (or T0's SAME, which is all it ever produces): still
-    # need T0's own free detection of a raw-text-only or time_frame-only change,
-    # since T0 can't tell REWORDED/BROADENED apart from SAME itself.
+    # SAME (or T0's SAME, which is all it ever produces): still need T0's own free
+    # detection of a raw-text-only or time_frame-only change, since T0 can't tell
+    # REWORDED apart from SAME itself.
     if relation == "REWORDED" or before.measure != after.measure:
         return RawChange("REWORDED", before, after)
     if (before.time_frame or "") != (after.time_frame or ""):
@@ -166,6 +178,7 @@ _CODE_BY_KIND = {
     "ADDED": "PRIMARY_ADDED",
     "REMOVED": "PRIMARY_REMOVED",
     "NARROWED": "PRIMARY_NARROWED",  # unreachable at T0 -- t0_matcher never returns "NARROWED"
+    "BROADENED": "PRIMARY_BROADENED",  # unreachable at T0, same reason
 }
 
 
@@ -208,12 +221,13 @@ def classify(
         before_measure = c.before.measure if c.before else None
         after_measure = c.after.measure if c.after else None
         tier = tiers.get(id(c), "T0")
+        confidence = _UNRESOLVED_CONFIDENCE if tier in _UNRESOLVED_TIERS else 1.0
 
         if c.kind == "REWORDED":
             # CONTEXT unconditionally: no semantic change, timing doesn't matter (TECH-PRD §6.1).
             findings.append(
                 Finding(
-                    nct, vfrom, vto, "REWORDED", "CONTEXT", before_measure, after_measure, None, None, 1.0, tier,
+                    nct, vfrom, vto, "REWORDED", "CONTEXT", before_measure, after_measure, None, None, confidence, tier,
                     _rationale("REWORDED", vfrom, vto, before_measure, after_measure, None),
                 )
             )
@@ -235,8 +249,8 @@ def classify(
 
         findings.append(
             Finding(
-                nct, vfrom, vto, change_type, severity, before_measure, after_measure, days_enrol, days_pcd, 1.0, tier,
-                _rationale(change_type, vfrom, vto, before_measure, after_measure, days_enrol),
+                nct, vfrom, vto, change_type, severity, before_measure, after_measure, days_enrol, days_pcd,
+                confidence, tier, _rationale(change_type, vfrom, vto, before_measure, after_measure, days_enrol),
             )
         )
     return findings

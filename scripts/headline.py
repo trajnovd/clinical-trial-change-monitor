@@ -15,6 +15,9 @@ def main() -> None:
     (n_post_completion,) = conn.execute(
         "SELECT COUNT(DISTINCT nct_id) FROM findings WHERE change_type='POST_COMPLETION_CHANGE'"
     ).fetchone()
+    (n_unresolved_signal,) = conn.execute(
+        "SELECT COUNT(*) FROM findings WHERE resolved_by='T2_UNRESOLVED' AND severity='SIGNAL'"
+    ).fetchone()
 
     print(f"corpus: {n_trials} trials")
     print(f"HEADLINE -- trials with >=1 post-enrolment primary change: {n_signal}")
@@ -26,6 +29,13 @@ def main() -> None:
         "so POST_COMPLETION_CHANGE is an upper bound, not a purity signal. Lead with the "
         "post-enrolment-primary-change number above instead."
     )
+    if n_unresolved_signal:
+        print(
+            f"  caveat: {n_unresolved_signal} SIGNAL findings rest on unresolved semantic "
+            "matches pending T3 coverage (resolved_by='T2_UNRESOLVED' -- the cascade "
+            "escalated these but never got an LLM adjudication; confidence=0.5, not the "
+            "usual 1.0, but severity is not downgraded)."
+        )
 
     print("\nby change_type:")
     for row in conn.execute("SELECT change_type, COUNT(*) AS n FROM findings GROUP BY change_type ORDER BY n DESC"):

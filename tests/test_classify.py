@@ -99,6 +99,14 @@ def test_diff_pair_matcher_narrowed_relation_flows_to_narrowed_kind():
     assert changes[0].kind == "NARROWED"
 
 
+def test_diff_pair_matcher_broadened_relation_flows_to_broadened_kind():
+    before = [_row("PRIMARY", 0, "Cardiovascular mortality")]
+    after = [_row("PRIMARY", 0, "All-cause mortality")]
+    changes = diff_pair(before, after, lambda b, a: "BROADENED")
+    assert len(changes) == 1
+    assert changes[0].kind == "BROADENED"
+
+
 def test_diff_pair_matcher_timepoint_changed_relation_flows_to_timepoint_kind():
     before = [_row("PRIMARY", 0, "Overall survival", time_frame="at 12 months")]
     after = [_row("PRIMARY", 0, "Overall survival", time_frame="at 24 months")]
@@ -134,6 +142,42 @@ def test_classify_narrowed_relation_maps_to_primary_narrowed_signal():
     assert len(findings) == 1
     assert findings[0].change_type == "PRIMARY_NARROWED"
     assert findings[0].severity == "SIGNAL"
+
+
+def test_classify_broadened_relation_maps_to_primary_broadened_signal():
+    before = [_row("PRIMARY", 0, "Cardiovascular mortality")]
+    after = [_row("PRIMARY", 0, "All-cause mortality")]
+    changes = diff_pair(before, after, lambda b, a: "BROADENED")
+    findings = classify("NCT1", 0, 1, date(2020, 4, 16), changes, ANCHORS_POST_ENROL)
+    assert len(findings) == 1
+    assert findings[0].change_type == "PRIMARY_BROADENED"
+    assert findings[0].severity == "SIGNAL"
+
+
+# ---- v03-review.md Important #1: unresolved-tier findings carry reduced confidence --
+
+
+def test_classify_t2_unresolved_tier_gets_reduced_confidence():
+    # An escalated-but-never-adjudicated pair still collapses to an ordinary
+    # REPLACED/SIGNAL finding (diff_pair has no "unresolved" concept, only matched vs.
+    # not) -- confidence is the only signal telling it apart from a confidently
+    # cascade-resolved finding downstream, so it must not silently read as 1.0.
+    before = [_row("PRIMARY", 0, "Some measure")]
+    after = [_row("PRIMARY", 0, "Unrelated measure")]
+    changes = diff_pair(before, after, lambda b, a: None)  # no match -> REPLACED collapse
+    tiers = {id(changes[0]): "T2_UNRESOLVED"}
+    findings = classify("NCT1", 0, 1, date(2020, 4, 16), changes, ANCHORS_POST_ENROL, tiers)
+    assert len(findings) == 1
+    assert findings[0].confidence == 0.5
+
+
+def test_classify_default_tier_keeps_full_confidence():
+    before = [_row("PRIMARY", 0, "Some measure")]
+    after = [_row("PRIMARY", 0, "Unrelated measure")]
+    changes = diff_pair(before, after, lambda b, a: None)
+    findings = classify("NCT1", 0, 1, date(2020, 4, 16), changes, ANCHORS_POST_ENROL)
+    assert len(findings) == 1
+    assert findings[0].confidence == 1.0
 
 
 # ---- classify -----------------------------------------------------------------------

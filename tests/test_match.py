@@ -95,6 +95,83 @@ def test_reverse_qualifier_is_broadened():
     assert pair.tier == "T2"
 
 
+# ---- v03-review.md Critical #1: T2's qualifier rule must not guess on generic -------
+# token-subset/superset -- only a curated restrictive-qualifier lexicon hit may fire
+# NARROWED/BROADENED. Regression fixtures below are the real corpus false positives
+# the review found by hand-inspecting live findings, verbatim.
+
+
+def test_abbreviation_expansion_pair_is_not_narrowed():
+    # NCT01189890 v0->v12, real corpus false positive: spelling out an abbreviation
+    # ("A1C" -> "Hemoglobin A1c (A1C)") added a word ("hemoglobin") that isn't a
+    # restrictive qualifier -- generic token-subset used to misread this as narrowing.
+    before = [_row("A1C change from baseline at Week 30")]
+    after = [_row("Hemoglobin A1c (A1C) change from baseline at Week 30")]
+    result = match_outcomes(before, after, t3=None)
+    pair = _only_pair(result)
+    assert pair.relation not in ("NARROWED", "BROADENED")
+
+
+def test_added_unrelated_monitoring_parameters_is_not_narrowed():
+    # NCT04604795 v0->v4, real corpus false positive, and a genuine *inversion*: three
+    # more parameter categories were added to what's monitored (vital signs, labs,
+    # ECG) -- broadening the scope of measurement, not narrowing it -- and the old
+    # generic rule filed it as PRIMARY_NARROWED/SIGNAL, backwards. None of the added
+    # words are in the curated restrictive-qualifier lexicon, so the fixed rule must
+    # not fire NARROWED *or* BROADENED here -- it has no basis to claim either
+    # direction and must escalate instead of guessing.
+    before = [_row(
+        "Part A: Number of participants with clinically significant changes in "
+        "physical examination following oral dosing"
+    )]
+    after = [_row(
+        "Part A: Number of participants with clinically significant changes in physical "
+        "examination, vital signs, laboratory parameters and 12-lead electrocardiogram "
+        "(ECG) following oral dosing"
+    )]
+    result = match_outcomes(before, after, t3=None)
+    pair = _only_pair(result)
+    assert pair.relation not in ("NARROWED", "BROADENED")
+
+
+def test_acronym_expansion_colliding_with_lexicon_word_is_not_narrowed():
+    # NCT00598637, found live after the lexicon fix above: "MACE" -> "major adverse
+    # cardiac event (MACE)" is a pure acronym spell-out, but "cardiac" happens to be a
+    # genuine restrictive-qualifier-lexicon word too, so the lexicon check alone still
+    # misfired here. The shared, verbatim "MACE" acronym on both sides is the tell.
+    before = [_row(
+        "incidence of MACE defined as a composite of death, MI and Target Lesion "
+        "revascularization (TLR)."
+    )]
+    after = [_row(
+        "Incidence of major adverse cardiac event (MACE) defined as a composite of "
+        "death, MI and target lesion revascularization (TLR)."
+    )]
+    result = match_outcomes(before, after, t3=None)
+    pair = _only_pair(result)
+    assert pair.relation not in ("NARROWED", "BROADENED")
+
+
+def test_qualifier_lexicon_direction_correctness_on_the_nct04604795_shape():
+    # Same enumerated-parameter-list shape as NCT04604795, but with an actual
+    # restrictive-qualifier-lexicon word ("cardiovascular") inserted alongside the
+    # unrelated ones -- this is the case the lexicon rule *should* catch, and must
+    # get the direction right: added lexicon word -> NARROWED, removed -> BROADENED
+    # (the mirror image of the same pair).
+    narrower = [_row(
+        "Part A: Number of participants with clinically significant changes in physical "
+        "examination, vital signs and cardiovascular assessment following oral dosing"
+    )]
+    broader = [_row(
+        "Part A: Number of participants with clinically significant changes in "
+        "physical examination following oral dosing"
+    )]
+    added = match_outcomes(broader, narrower, t3=None)
+    assert _only_pair(added).relation == "NARROWED"
+    removed = match_outcomes(narrower, broader, t3=None)
+    assert _only_pair(removed).relation == "BROADENED"
+
+
 # ---- T3 injection: fakes only, never the real CLI ------------------------------------
 
 
@@ -194,6 +271,34 @@ def test_tier_counts_sum_matches_number_of_matched_pairs_when_no_escalation():
     result = match_outcomes(before, after, t3=None)
     assert sum(result.tier_counts.values()) == 2
     assert all(p.relation == "SAME" for p in result.pairs)
+
+
+def test_t3_escalation_capped_to_one_attempt_per_item():
+    # Two before items both land in the escalation band against the SAME after item,
+    # at different scores. Without the one-shot-per-item cap (2f479d0), once the
+    # best-scoring candidate's T3 call comes back DIFFERENT, the loser would still get
+    # its own separate T3 call against the same after-item -- redundant re-litigation
+    # of "does this item have a match at all" that the cap exists to avoid.
+    before = [
+        _row("Six minute walk distance improvement"),        # Jaccard vs after ~0.8 -- tried first
+        _row("Six minute walk distance change from visit"),  # Jaccard vs after ~0.67 -- must be capped
+    ]
+    after = [_row("Six minute walk distance change from screening")]
+
+    calls = []
+
+    def counting_t3(b, a):
+        calls.append(b.measure)
+        return {"relation": "DIFFERENT", "confidence": 0.5, "reasoning": "not a match"}
+
+    result = match_outcomes(before, after, t3=counting_t3)
+
+    assert calls == ["Six minute walk distance improvement"]  # only one T3 call, ever
+    assert result.tier_counts.get("T3") == 1
+    # the second before-item was never even attempted -- capped, not "also tried and failed"
+    second_item_pairs = [p for p in result.pairs if p.b_idx == 1]
+    assert len(second_item_pairs) == 1
+    assert second_item_pairs[0].a_idx is None
 
 
 # ---- MATCH_RELATIONS export used by classify.py's contract --------------------------
