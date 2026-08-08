@@ -1,0 +1,1088 @@
+<!doctype html>
+<!--
+  Redline — timeline scrubber prototype (Task 11).
+  Single self-contained file: vanilla HTML/CSS/JS, no build step, no external CDNs.
+
+  Design tokens (see ui-report.md for full rationale):
+    Palette   --paper #EDF0F0 · --paper-raised #FFFFFF · --ink #171B1F · --ink-muted #5B6570
+              --accent #21508C (registry stamp blue) · --flag #9C2B3B (redline brick red)
+    Type      --mono  (registry IDs, dates, version tags — the "case-file" voice)
+              --sans  (prose — outcome text, headings)
+    Layout    Document/ledger metaphor: masthead strip, ruled table, case-report cards.
+    Signature The scrubber: a ruler-like track with true-to-date reference lines (dashed)
+              and evenly spaced, keyboard- and drag-operable version nodes.
+    Motion    One moment only — word-diff marks (<ins>/<del>) fade in when the selection
+              changes; respects prefers-reduced-motion.
+
+  Data-access seam: the ENTIRE app reads trial data through one function, getTrial(nctId).
+  It resolves hardcoded JSON today; swap its body for
+    const res = await fetch('/api/trials/' + nctId); return res.json();
+  and nothing else in this file has to change.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Redline — Clinical Trial Registry Change Monitor</title>
+<style>
+  :root {
+    --paper: #EDF0F0;
+    --paper-raised: #FFFFFF;
+    --ink: #171B1F;
+    --ink-muted: #5B6570;
+    --line: #C7CDD2;
+    --accent: #21508C;
+    --accent-soft: #DCE6F2;
+    --flag: #9C2B3B;
+    --flag-soft: #F3DEE1;
+    --neutral-soft: #E4E7E7;
+    --focus: #21508C;
+    --radius: 8px;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, "Liberation Mono", monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #15191C;
+      --paper-raised: #1D2327;
+      --ink: #E8ECEE;
+      --ink-muted: #97A2A9;
+      --line: #343C41;
+      --accent: #7FAEE6;
+      --accent-soft: #22344A;
+      --flag: #E2909B;
+      --flag-soft: #3D232A;
+      --neutral-soft: #262C2F;
+      --focus: #7FAEE6;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html { color-scheme: light dark; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  h1, h2, h3 { font-weight: 700; margin: 0; }
+  p { margin: 0; }
+  a { color: var(--accent); }
+  ul { margin: 0; padding: 0; list-style: none; }
+  button { font: inherit; color: inherit; }
+  .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+  :focus { outline: none; }
+  :focus-visible {
+    outline: 3px solid var(--focus);
+    outline-offset: 2px;
+    border-radius: 3px;
+  }
+
+  /* ---------- topbar (shared) ---------- */
+  .topbar {
+    display: flex;
+    align-items: baseline;
+    gap: .75rem;
+    padding: 1rem 1.5rem;
+    border-bottom: 1px solid var(--line);
+    background: var(--paper-raised);
+  }
+  .brand {
+    font-family: var(--mono);
+    font-weight: 700;
+    font-size: 1.05rem;
+    letter-spacing: .02em;
+    color: var(--ink);
+    text-decoration: none;
+  }
+  .brand:hover { color: var(--accent); }
+  .brand-sub {
+    font-size: .8rem;
+    color: var(--ink-muted);
+  }
+
+  main { max-width: 78rem; margin: 0 auto; padding: 2rem 1.5rem 4rem; }
+
+  /* ---------- index view ---------- */
+  .masthead { padding: .5rem 0 2rem; border-bottom: 1px solid var(--line); margin-bottom: 1.75rem; }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: .78rem;
+    text-transform: uppercase;
+    letter-spacing: .12em;
+    color: var(--ink-muted);
+    margin-bottom: .6rem;
+  }
+  .masthead h1 {
+    font-size: clamp(1.4rem, 2.6vw, 2rem);
+    line-height: 1.25;
+    max-width: 42rem;
+  }
+  .masthead h1 .counter {
+    font-family: var(--mono);
+    color: var(--accent);
+  }
+  .tagline { margin-top: .75rem; color: var(--ink-muted); font-size: .95rem; }
+
+  .filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .8rem 1.4rem;
+    margin-bottom: 1.5rem;
+  }
+  .filter-group { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; }
+  .filter-label {
+    font-family: var(--mono);
+    font-size: .72rem;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    color: var(--ink-muted);
+    margin-right: .15rem;
+  }
+  .chip {
+    font-family: var(--mono);
+    font-size: .8rem;
+    padding: .3rem .7rem;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--paper-raised);
+    cursor: pointer;
+  }
+  .chip:hover { border-color: var(--accent); }
+  .chip[aria-pressed="true"] {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+
+  .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--paper-raised); }
+  table.ledger { width: 100%; border-collapse: collapse; font-size: .92rem; min-width: 46rem; }
+  table.ledger th, table.ledger td { padding: .7rem .9rem; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  table.ledger th {
+    font-family: var(--mono);
+    font-size: .72rem;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    color: var(--ink-muted);
+    cursor: pointer;
+    user-select: none;
+  }
+  table.ledger th:hover { color: var(--ink); }
+  table.ledger th .sort-arrow { opacity: .5; margin-left: .2rem; }
+  table.ledger tbody tr { cursor: pointer; }
+  table.ledger tbody tr:hover { background: var(--accent-soft); }
+  table.ledger tbody tr:last-child td { border-bottom: none; }
+  .nct-link { font-family: var(--mono); font-weight: 600; }
+  .tag {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: .72rem;
+    padding: .15rem .5rem;
+    border-radius: 4px;
+  }
+  .tag.severity-signal { background: var(--flag-soft); color: var(--flag); }
+  .empty-row td { text-align: center; color: var(--ink-muted); padding: 2rem; white-space: normal; }
+
+  /* ---------- trial view ---------- */
+  .back-link {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: .82rem;
+    color: var(--ink-muted);
+    text-decoration: none;
+    margin-bottom: 1.25rem;
+  }
+  .back-link:hover { color: var(--accent); }
+
+  .trial-header { padding-bottom: 1.5rem; border-bottom: 1px solid var(--line); margin-bottom: 2rem; }
+  .trial-id-row { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin-bottom: .5rem; }
+  .nct-id { font-family: var(--mono); font-weight: 700; font-size: 1.05rem; }
+  .status-pill {
+    font-family: var(--mono);
+    font-size: .72rem;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    padding: .15rem .55rem;
+    border-radius: 4px;
+    background: var(--neutral-soft);
+    color: var(--ink-muted);
+  }
+  .trial-title { font-size: 1.4rem; margin-bottom: .3rem; }
+  .trial-official { color: var(--ink-muted); font-size: .88rem; max-width: 52rem; margin-bottom: .6rem; }
+  .trial-meta { display: flex; flex-wrap: wrap; gap: 1.4rem; font-size: .85rem; color: var(--ink-muted); }
+  .trial-meta strong { color: var(--ink); font-weight: 600; }
+
+  /* the scrubber: signature element */
+  .scrubber { margin-bottom: 1.5rem; }
+  .scrubber-scroll { overflow-x: auto; padding: 0 .25rem; }
+  .scrubber-track {
+    position: relative;
+    height: 108px;
+    min-width: 30rem;
+    margin: 0 .5rem;
+    touch-action: none;
+  }
+  .timeline-baseline {
+    position: absolute;
+    left: 6%; right: 6%; top: 58px;
+    height: 2px;
+    background: var(--line);
+  }
+  .ref-line {
+    position: absolute;
+    top: 14px; bottom: 14px;
+    width: 0;
+    border-left: 2px dashed var(--ink-muted);
+    transform: translateX(-1px);
+  }
+  .ref-label {
+    position: absolute;
+    top: -2px;
+    transform: translateX(-50%);
+    font-family: var(--mono);
+    font-size: .66rem;
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    color: var(--ink-muted);
+    white-space: nowrap;
+    background: var(--paper);
+    padding: 0 .3rem;
+  }
+  .v-marker {
+    position: absolute;
+    top: 58px;
+    transform: translate(-50%, -50%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: .4rem;
+  }
+  .v-node {
+    width: 15px; height: 15px;
+    border-radius: 50%;
+    border: 2px solid var(--ink);
+    background: var(--paper-raised);
+    cursor: pointer;
+    padding: 0;
+  }
+  .v-node[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); }
+  .v-node:hover { border-color: var(--accent); }
+  .v-label {
+    position: absolute;
+    top: 20px;
+    font-family: var(--mono);
+    font-size: .72rem;
+    color: var(--ink-muted);
+    white-space: nowrap;
+  }
+  .playhead {
+    position: absolute;
+    top: 8px; bottom: 8px;
+    width: 3px;
+    background: var(--accent);
+    transform: translateX(-50%);
+    pointer-events: none;
+    border-radius: 2px;
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .playhead { transition: left .12s ease-out; }
+  }
+
+  .readout {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: .6rem;
+    padding: .9rem 1rem;
+    background: var(--paper-raised);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    margin-bottom: 2rem;
+  }
+  .readout-version { font-family: var(--mono); font-weight: 700; font-size: 1.3rem; }
+  .readout-date { font-family: var(--mono); font-size: 1.05rem; color: var(--ink-muted); }
+  .readout-days {
+    font-family: var(--mono);
+    font-size: .82rem;
+    padding: .2rem .6rem;
+    border-radius: 4px;
+    background: var(--neutral-soft);
+    color: var(--ink-muted);
+  }
+  .readout-days.after-enrolment { background: var(--accent-soft); color: var(--accent); }
+  .readout-days.after-completion { background: var(--flag-soft); color: var(--flag); }
+  .readout-status { margin-left: auto; font-size: .8rem; color: var(--ink-muted); }
+
+  .outcome-panel { display: grid; grid-template-columns: 1.4fr 1fr; gap: 1.5rem; align-items: start; }
+  @media (max-width: 62rem) { .outcome-panel { grid-template-columns: 1fr; } }
+
+  .card {
+    background: var(--paper-raised);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 1.25rem 1.4rem;
+  }
+  .card-label {
+    font-family: var(--mono);
+    font-size: .72rem;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    color: var(--ink-muted);
+    margin-bottom: .5rem;
+  }
+  .primary-card { border-left: 4px solid var(--accent); }
+  .primary-measure { font-size: 1.15rem; font-weight: 600; margin-bottom: .5rem; }
+  .primary-timeframe { font-family: var(--mono); font-size: .82rem; color: var(--ink-muted); margin-bottom: .8rem; }
+  .primary-description { font-size: .92rem; white-space: pre-line; }
+  .primary-extra { margin-top: 1rem; padding-top: .9rem; border-top: 1px dashed var(--line); }
+  .primary-extra-item { font-size: .85rem; margin-bottom: .3rem; }
+  .primary-extra-item .badge {
+    font-family: var(--mono);
+    font-size: .65rem;
+    text-transform: uppercase;
+    color: var(--ink-muted);
+    margin-left: .4rem;
+  }
+
+  ins, del { text-decoration: none; }
+  ins { background: var(--accent-soft); color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+  del { background: var(--flag-soft); color: var(--flag); text-decoration: line-through; }
+  @media (prefers-reduced-motion: no-preference) {
+    .primary-card ins, .primary-card del,
+    .secondary-list ins, .secondary-list del,
+    .secondary-list li.is-new {
+      animation: markReveal .5s ease-out;
+    }
+  }
+  @keyframes markReveal { from { opacity: 0; } to { opacity: 1; } }
+
+  .secondary-list { max-height: 26rem; overflow-y: auto; }
+  .secondary-list li {
+    display: flex;
+    justify-content: space-between;
+    gap: .8rem;
+    font-size: .85rem;
+    padding: .45rem 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .secondary-list li:last-child { border-bottom: none; }
+  .secondary-list li.is-new { background: var(--accent-soft); margin: 0 -.6rem; padding: .45rem .6rem; border-radius: 4px; border-bottom-color: transparent; }
+  .sec-measure { flex: 1; }
+  .sec-timeframe { font-family: var(--mono); color: var(--ink-muted); white-space: nowrap; font-size: .78rem; }
+  .is-new .sec-measure::after {
+    content: "new";
+    font-family: var(--mono);
+    font-size: .62rem;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-left: .5rem;
+    vertical-align: middle;
+  }
+  .secondary-removed { margin-top: .9rem; padding-top: .9rem; border-top: 1px dashed var(--line); }
+  .secondary-removed .card-label { color: var(--flag); }
+  .secondary-removed li { border-bottom: none; padding: .2rem 0; }
+
+  .deep-links {
+    margin-top: 1.5rem;
+    font-size: .85rem;
+    color: var(--ink-muted);
+  }
+  .deep-links a { margin: 0 .2rem; }
+
+  @media (max-width: 30rem) {
+    main { padding: 1.25rem 1rem 3rem; }
+    .filters { gap: .6rem 1rem; }
+  }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<script>
+"use strict";
+
+/* =========================================================================
+   1. DATA — trimmed real ClinicalTrials.gov history for NCT04280705 (ACTT-1).
+      Fetched 2026-08-08 from the int API: /history for the version list,
+      /history/{v} for versions 0, 9, 14, 24. Only the fields the UI needs.
+   ========================================================================= */
+  const TRIAL_DATA = {
+    "nctId": "NCT04280705",
+    "briefTitle": "Adaptive COVID-19 Treatment Trial (ACTT)",
+    "officialTitle": "A Multicenter, Adaptive, Randomized Blinded Controlled Trial of the Safety and Efficacy of Investigational Therapeutics for the Treatment of COVID-19 in Hospitalized Adults",
+    "sponsor": "National Institute of Allergy and Infectious Diseases (NIAID)",
+    "sponsorClass": "NIH",
+    "phase": "PHASE3",
+    "enrolmentStart": "2020-02-21",
+    "primaryCompletion": "2020-05-21",
+    "historyUrl": "https://clinicaltrials.gov/study/NCT04280705?tab=history",
+    "changeType": "Primary outcome replaced",
+    "severity": "Signal",
+    "signalVersion": 14,
+    "versions": [
+      {
+        "version": 0,
+        "date": "2020-02-20",
+        "overallStatus": "NOT_YET_RECRUITING",
+        "primaryOutcomes": [
+          {
+            "measure": "Percentage of subjects reporting each severity rating on the 7-point ordinal scale",
+            "description": "The ordinal scale is an assessment of the clinical status at the first assessment of a given study day.\nThe scale is as follows: 1) Death; 2) Hospitalized, on invasive mechanical ventilation or extracorporeal membrane oxygenation (ECMO); 3) Hospitalized, on non-invasive ventilation or high flow oxygen devices; 4) Hospitalized, requiring supplemental oxygen; 5) Hospitalized, not requiring supplemental oxygen; 6) Not hospitalized, limitation on activities; 7) Not hospitalized, no limitations on activities.",
+            "timeFrame": "Day 15"
+          }
+        ],
+        "secondaryOutcomes": [
+          { "measure": "Change from baseline in alanine transaminase (ALT)", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Change from baseline in aspartate transaminase (AST)", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Change from baseline in creatinine", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Change from baseline in glucose", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Change from baseline in hemoglobin", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Change from baseline in platelets", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Change from baseline in total bilirubin", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Change from baseline in white blood cell count", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Change in National Early Warning Score (NEWS) from baseline", "timeFrame": "Day 3 through Day 29" },
+          { "measure": "Cumulative incidence of serious adverse events (SAEs)", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Cumulative incidence of severe adverse events (AEs)", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Discontinuation temporary suspension of infusions", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Duration of hospitalization", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Duration of new mechanical ventilation", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Duration of new oxygen use", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Incidence of new mechanical ventilation", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Incidence of new oxygen use", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Mean change in the ordinal scale from baseline", "timeFrame": "Day 3 through Day 29" },
+          { "measure": "Number of oxygenation free days", "timeFrame": "Day 1 to Day 29" },
+          { "measure": "Number of ventilator free days", "timeFrame": "Day 1 to Day 29" },
+          { "measure": "Subject clinical status using ordinal scale", "timeFrame": "Day 3 through Day 29" },
+          { "measure": "Subject mortality", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Time to an improvement of one category from admission using an ordinal scale", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Time to discharge or to a National Early Warning Score (NEWS) of </= 2 and maintained for 24 hours, whichever occurs first", "timeFrame": "Day 1 through Day 29" }
+        ]
+      },
+      {
+        "version": 9,
+        "date": "2020-03-20",
+        "overallStatus": "RECRUITING",
+        "primaryOutcomes": [
+          {
+            "measure": "Percentage of subjects reporting each severity rating on an 8-point ordinal scale",
+            "description": "The ordinal scale is an assessment of the clinical status at the first assessment of a given study day.\nThe scale is as follows: 1) Death; 2) Hospitalized, on invasive mechanical ventilation or extracorporeal membrane oxygenation (ECMO); 3) Hospitalized, on non-invasive ventilation or high flow oxygen devices; 4) Hospitalized, requiring supplemental oxygen; 5) Hospitalized, not requiring supplemental oxygen - requiring ongoing medical care (COVID-19 related or otherwise); 6) Hospitalized, not requiring supplemental oxygen - no longer requires ongoing medical care; 7) Not hospitalized, limitation on activities and/or requiring home oxygen; 8) Not hospitalized, no limitations on activities.",
+            "timeFrame": "Day 15"
+          }
+        ],
+        "secondaryOutcomes": [
+          { "measure": "Change from baseline in alanine transaminase (ALT)", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Change from baseline in aspartate transaminase (AST)", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Change from baseline in creatinine", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Change from baseline in glucose", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Change from baseline in hemoglobin", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Change from baseline in platelets", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Change from baseline in prothrombin time (PT)", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Change from baseline in total bilirubin", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Change from baseline in white blood cell count with differential", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Change in National Early Warning Score (NEWS) from baseline", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Clinical status using ordinal scale", "timeFrame": "Day 3 through Day 29" },
+          { "measure": "Cumulative incidence of Grade 3 and 4 adverse events (AEs)", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Cumulative incidence of serious adverse events (SAEs)", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Discontinuation or temporary suspension of infusions", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Duration of hospitalization", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Duration of new non-invasive ventilation or high flow oxygen use", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Duration of new oxygen use", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Duration of new ventilator or extracorporeal membrane oxygenation (ECMO) use", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Incidence of new non-invasive ventilation or high flow oxygen use", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Incidence of new oxygen use", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Incidence of new ventilator or extracorporeal membrane oxygenation (ECMO) use", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Mean change in the ordinal scale", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Number of non-invasive ventilation/high flow oxygen free days", "timeFrame": "Day 1 to Day 29" },
+          { "measure": "Number of oxygenation free days", "timeFrame": "Day 1 to Day 29" },
+          { "measure": "Subject 14-day mortality", "timeFrame": "Day 1 through Day 15" },
+          { "measure": "Subject 28-day mortality", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Time to an improvement of one category using an ordinal scale", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Time to an improvement of two categories using an ordinal scale", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Time to discharge or to a National Early Warning Score (NEWS) of </= 2 and maintained for 24 hours, whichever occurs first", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Ventilator/extracorporeal membrane oxygenation (ECMO) free days", "timeFrame": "Day 1 through Day 29" }
+        ]
+      },
+      {
+        "version": 14,
+        "date": "2020-04-16",
+        "overallStatus": "RECRUITING",
+        "primaryOutcomes": [
+          {
+            "measure": "Time to recovery",
+            "description": "Day of recovery is defined as the first day on which the subject satisfies one of the following three categories from the ordinal scale: 1) Hospitalized, not requiring supplemental oxygen - no longer requires ongoing medical care; 2) Not hospitalized, limitation on activities and/or requiring home oxygen; 3) Not hospitalized, no limitations on activities.",
+            "timeFrame": "Day 1 through Day 29"
+          }
+        ],
+        "secondaryOutcomes": [
+          { "measure": "Change from baseline in alanine transaminase (ALT)", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Change from baseline in aspartate transaminase (AST)", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Change from baseline in creatinine", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Change from baseline in glucose", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Change from baseline in hemoglobin", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Change from baseline in platelets", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Change from baseline in prothrombin time (PT)", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Change from baseline in total bilirubin", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Change from baseline in white blood cell count (WBC) with differential", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Change in National Early Warning Score (NEWS) from baseline", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Clinical status using ordinal scale", "timeFrame": "Day 3 through Day 29" },
+          { "measure": "Cumulative incidence of Grade 3 and 4 clinical and/or laboratory adverse events (AEs)", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Cumulative incidence of serious adverse events (SAEs)", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Discontinuation or temporary suspension of investigational therapeutics", "timeFrame": "Day 1 through Day 10" },
+          { "measure": "Duration of hospitalization", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Duration of new non-invasive ventilation or high flow oxygen use", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Duration of new oxygen use", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Duration of new ventilator or extracorporeal membrane oxygenation (ECMO) use", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Incidence of new non-invasive ventilation or high flow oxygen use", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Incidence of new oxygen use", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Incidence of new ventilator or extracorporeal membrane oxygenation (ECMO) use", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Mean change in the ordinal scale", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Percentage of subjects reporting each severity rating on an 8-point ordinal scale", "timeFrame": "Day 15" },
+          { "measure": "Subject 14-day mortality", "timeFrame": "Day 1 through Day 15" },
+          { "measure": "Subject 29-day mortality", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Time to an improvement of one category using an ordinal scale", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Time to an improvement of two categories using an ordinal scale", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Time to discharge or to a National Early Warning Score (NEWS) of </= 2 and maintained for 24 hours, whichever occurs first", "timeFrame": "Day 1 through Day 29" }
+        ]
+      },
+      {
+        "version": 24,
+        "date": "2022-03-09",
+        "overallStatus": "COMPLETED",
+        "primaryOutcomes": [
+          {
+            "measure": "Time to Recovery",
+            "description": "Day of recovery is defined as the first day on which the subject satisfies one of the following three categories from the ordinal scale: 1) Hospitalized, not requiring supplemental oxygen - no longer requires ongoing medical care; 2) Not hospitalized, limitation on activities and/or requiring home oxygen; 3) Not hospitalized, no limitations on activities.",
+            "timeFrame": "Day 1 through Day 29"
+          },
+          {
+            "measure": "Time to Recovery by Race",
+            "description": "Day of recovery is defined as the first day on which the subject satisfies one of the following three categories from the ordinal scale: 1) Hospitalized, not requiring supplemental oxygen - no longer requires ongoing medical care; 2) Not hospitalized, limitation on activities and/or requiring home oxygen; 3) Not hospitalized, no limitations on activities.",
+            "timeFrame": "Day 1 through Day 29"
+          },
+          {
+            "measure": "Time to Recovery by Ethnicity",
+            "description": "Day of recovery is defined as the first day on which the subject satisfies one of the following three categories from the ordinal scale: 1) Hospitalized, not requiring supplemental oxygen - no longer requires ongoing medical care; 2) Not hospitalized, limitation on activities and/or requiring home oxygen; 3) Not hospitalized, no limitations on activities.",
+            "timeFrame": "Day 1 through Day 29"
+          },
+          {
+            "measure": "Time to Recovery by Sex",
+            "description": "Day of recovery is defined as the first day on which the subject satisfies one of the following three categories from the ordinal scale: 1) Hospitalized, not requiring supplemental oxygen - no longer requires ongoing medical care; 2) Not hospitalized, limitation on activities and/or requiring home oxygen; 3) Not hospitalized, no limitations on activities.",
+            "timeFrame": "Day 1 through Day 29"
+          }
+        ],
+        "secondaryOutcomes": [
+          { "measure": "Change From Baseline in Alanine Transaminase (ALT)", "timeFrame": "Days 1, 3, 5, 8, 11, 15 and 29" },
+          { "measure": "Change From Baseline in Aspartate Transaminase (AST)", "timeFrame": "Days 1, 3, 5, 8, 11, 15 and 29" },
+          { "measure": "Change From Baseline in Creatinine", "timeFrame": "Days 1, 3, 5, 8, 11, 15 and 29" },
+          { "measure": "Change From Baseline in Glucose", "timeFrame": "Days 1, 3, 5, 8, 11, 15 and 29" },
+          { "measure": "Change From Baseline in Hemoglobin", "timeFrame": "Days 1, 3, 5, 8, 11, 15 and 29" },
+          { "measure": "Change From Baseline in Platelets", "timeFrame": "Days 1, 3, 5, 8, 11, 15 and 29" },
+          { "measure": "Change From Baseline in Prothrombin Time (PT)", "timeFrame": "Days 1, 3, 5, 8, 11, 15 and 29" },
+          { "measure": "Change From Baseline in Total Bilirubin", "timeFrame": "Days 1, 3, 5, 8, 11, 15 and 29" },
+          { "measure": "Change From Baseline in White Blood Cell Count (WBC)", "timeFrame": "Days 1, 3, 5, 8, 11, 15 and 29" },
+          { "measure": "Change From Baseline in Neutrophils", "timeFrame": "Days 1, 3, 5, 8, 11, 15 and 29" },
+          { "measure": "Change From Baseline in Lymphocytes", "timeFrame": "Days 1, 3, 5, 8, 11, 15 and 29" },
+          { "measure": "Change From Baseline in Monocytes", "timeFrame": "Days 1, 3, 5, 8, 11, 15 and 29" },
+          { "measure": "Change From Baseline in Basophils", "timeFrame": "Days 1, 3, 5, 8, 11, 15 and 29" },
+          { "measure": "Change From Baseline in Eosinophils", "timeFrame": "Days 1, 3, 5, 8, 11, 15 and 29" },
+          { "measure": "Change in National Early Warning Score (NEWS) From Baseline", "timeFrame": "Days 1, 3, 5, 8, 11, 15, 22, and 29" },
+          { "measure": "Percentage of Participants at Each Clinical Status Using Ordinal Scale at Day 1", "timeFrame": "Day 1" },
+          { "measure": "Percentage of Participants at Each Clinical Status Using Ordinal Scale at Day 3", "timeFrame": "Day 3" },
+          { "measure": "Percentage of Participants at Each Clinical Status Using Ordinal Scale at Day 5", "timeFrame": "Day 5" },
+          { "measure": "Percentage of Participants at Each Clinical Status Using Ordinal Scale at Day 8", "timeFrame": "Day 8" },
+          { "measure": "Percentage of Participants at Each Clinical Status Using Ordinal Scale at Day 11", "timeFrame": "Day 11" },
+          { "measure": "Percentage of Participants at Each Clinical Status Using Ordinal Scale at Day 15", "timeFrame": "Day 15" },
+          { "measure": "Percentage of Participants at Each Clinical Status Using Ordinal Scale at Day 22", "timeFrame": "Day 22" },
+          { "measure": "Percentage of Participants at Each Clinical Status Using Ordinal Scale at Day 29", "timeFrame": "Day 29" },
+          { "measure": "Percentage of Participants Reporting Grade 3 and 4 Clinical and/or Laboratory Adverse Events (AEs)", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Percentage of Participants Reporting Serious Adverse Events (SAEs)", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Percentage of Participants Discontinued or Temporarily Suspended From Investigational Therapeutics", "timeFrame": "Day 1 through Day 10" },
+          { "measure": "Duration of Hospitalization", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Duration of New Non-invasive Ventilation or High Flow Oxygen Use", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Duration of New Oxygen Use", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Duration of New Ventilator or Extracorporeal Membrane Oxygenation (ECMO) Use", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Percentage of Participants Requiring New Non-invasive Ventilation or High-flow Oxygen Use", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Percentage of Participants Requiring New Oxygen Use", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Percentage of Participants Requiring New Ventilator or Extracorporeal Membrane Oxygenation (ECMO) Use", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Mean Change in the Ordinal Scale", "timeFrame": "Day 1, 3, 5, 8, 11, 15, 22, and 29" },
+          { "measure": "14-day Participant Mortality", "timeFrame": "Day 1 through Day 15" },
+          { "measure": "29-day Participant Mortality", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Time to an Improvement by at Least One Category Using an Ordinal Scale", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Time to an Improvement of at Least Two Categories Using an Ordinal Scale", "timeFrame": "Day 1 through Day 29" },
+          { "measure": "Time to Discharge or to a NEWS of 2 or Less and Maintained for 24 Hours, Whichever Occurs First", "timeFrame": "Day 1 through Day 29" }
+        ]
+      }
+    ]
+  };
+
+  // The trials the index view lists. One entry today; adding a trial to the
+  // aggregate index is adding an NCT id here plus a getTrial() case — no
+  // other code changes.
+  const INDEX_NCT_IDS = ["NCT04280705"];
+
+/* =========================================================================
+   2. DATA ACCESS — the one seam between "hardcoded" and "real".
+   ========================================================================= */
+  async function getTrial(nctId) {
+    if (nctId === TRIAL_DATA.nctId) return TRIAL_DATA;
+    return null;
+    // Swap for the live pipeline:
+    //   const res = await fetch('/api/trials/' + encodeURIComponent(nctId));
+    //   return res.ok ? res.json() : null;
+  }
+
+/* =========================================================================
+   3. UTILITIES — dates, escaping, word-level LCS diff.
+   ========================================================================= */
+  function daysBetween(laterISO, earlierISO) {
+    return Math.round((new Date(laterISO) - new Date(earlierISO)) / 86400000);
+  }
+
+  function fmtDaysAfterEnrolment(days) {
+    if (days === 0) return "day enrolment began";
+    if (days > 0) return "+" + days + " day" + (days === 1 ? "" : "s") + " after enrolment began";
+    return Math.abs(days) + " day" + (Math.abs(days) === 1 ? "" : "s") + " before enrolment began";
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+    }[c]));
+  }
+
+  // Word-level LCS diff. Tokenizes on whitespace boundaries (keeping the
+  // whitespace as its own token) so re-joined output preserves spacing.
+  // O(n*m) time/space — fine for outcome-text-length inputs (tens to low
+  // hundreds of tokens); not meant for diffing whole documents.
+  function tokenize(s) {
+    return (s || "").match(/\s+|[^\s]+/g) || [];
+  }
+
+  function diffWords(oldText, newText) {
+    const a = tokenize(oldText), b = tokenize(newText);
+    const n = a.length, m = b.length;
+    const dp = new Array(n + 1);
+    for (let i = 0; i <= n; i++) dp[i] = new Uint16Array(m + 1);
+    for (let i = n - 1; i >= 0; i--) {
+      for (let j = m - 1; j >= 0; j--) {
+        dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+      }
+    }
+    const ops = [];
+    let i = 0, j = 0;
+    while (i < n && j < m) {
+      if (a[i] === b[j]) { ops.push(["eq", a[i]]); i++; j++; }
+      else if (dp[i + 1][j] >= dp[i][j + 1]) { ops.push(["del", a[i]]); i++; }
+      else { ops.push(["ins", b[j]]); j++; }
+    }
+    while (i < n) { ops.push(["del", a[i]]); i++; }
+    while (j < m) { ops.push(["ins", b[j]]); j++; }
+    return ops;
+  }
+
+  // Renders diffed HTML; with no previous text, renders plain (baseline version).
+  //
+  // ponytail: below a similarity threshold, skip the interleaved word diff and
+  // show one <del> block + one <ins> block instead. Pure word-LCS on two
+  // largely-unrelated passages (e.g. a fully replaced outcome description)
+  // matches on stray stopwords ("the", "of", "is") and reads as noise right
+  // where this UI most needs to read clean: a total rewrite. Upgrade path if
+  // ever needed: a real similarity metric (e.g. token Jaccard) instead of the
+  // matched-word ratio already sitting in the LCS ops.
+  function renderDiff(oldText, newText) {
+    if (oldText === null || oldText === undefined) return escapeHtml(newText || "");
+    const ops = diffWords(oldText, newText);
+    const wordCount = (t) => (t.match(/\S+/g) || []).length;
+    const eqWords = ops.filter(([type, word]) => type === "eq" && word.trim() !== "").length;
+    const totalWords = Math.max(wordCount(oldText), wordCount(newText));
+    if (totalWords > 4 && eqWords / totalWords < 0.35) {
+      return (oldText ? "<del>" + escapeHtml(oldText) + "</del> " : "") + "<ins>" + escapeHtml(newText || "") + "</ins>";
+    }
+    return ops.map(([type, word]) => {
+      const safe = escapeHtml(word);
+      if (type === "eq") return safe;
+      return type === "del" ? "<del>" + safe + "</del>" : "<ins>" + safe + "</ins>";
+    }).join("");
+  }
+
+/* =========================================================================
+   4. ROUTER
+   ========================================================================= */
+  window.addEventListener("hashchange", route);
+  window.addEventListener("DOMContentLoaded", route);
+
+  async function route() {
+    const hash = location.hash || "#/";
+    const m = hash.match(/^#\/trial\/([^/]+)/);
+    activeScrubber = null; // leaving (or not yet on) the trial view disarms arrow-key scrubbing
+    if (m) await renderTrialView(decodeURIComponent(m[1]));
+    else await renderIndexView();
+  }
+
+  function topbarHtml() {
+    return (
+      '<header class="topbar">' +
+        '<a class="brand" href="#/">Redline</a>' +
+        '<span class="brand-sub">Clinical Trial Registry Change Monitor</span>' +
+      "</header>"
+    );
+  }
+
+/* =========================================================================
+   5. INDEX VIEW
+   ========================================================================= */
+  function summarize(trial) {
+    const sv = trial.versions.find((v) => v.version === trial.signalVersion);
+    return {
+      nctId: trial.nctId,
+      briefTitle: trial.briefTitle,
+      severity: trial.severity,
+      changeType: trial.changeType,
+      sponsorClass: trial.sponsorClass,
+      phase: trial.phase,
+      daysAfterEnrolment: daysBetween(sv.date, trial.enrolmentStart)
+    };
+  }
+
+  function phaseLabel(p) {
+    return p ? p.replace("PHASE", "Phase ") : "—";
+  }
+
+  let indexSort = { key: "daysAfterEnrolment", dir: -1 };
+  let indexFilters = { severity: new Set(), changeType: new Set(), sponsorClass: new Set(), phase: new Set() };
+
+  async function renderIndexView() {
+    const app = document.getElementById("app");
+    const trials = (await Promise.all(INDEX_NCT_IDS.map(getTrial))).filter(Boolean);
+    const summaries = trials.map(summarize);
+    const changedCount = summaries.filter((s) => s.severity === "Signal").length;
+
+    const filterDefs = [
+      ["severity", "Severity"], ["changeType", "Change"], ["sponsorClass", "Sponsor class"], ["phase", "Phase"]
+    ];
+    const chipsHtml = filterDefs.map(([key, label]) => {
+      const values = [...new Set(summaries.map((s) => key === "phase" ? phaseLabel(s.phase) : s[key]))];
+      const chips = values.map((v) => {
+        const pressed = indexFilters[key].has(v);
+        return '<button class="chip" data-filter-key="' + key + '" data-filter-value="' + escapeHtml(v) +
+               '" aria-pressed="' + pressed + '">' + escapeHtml(v) + "</button>";
+      }).join("");
+      return '<div class="filter-group"><span class="filter-label">' + label + "</span>" + chips + "</div>";
+    }).join("");
+
+    app.innerHTML =
+      topbarHtml() +
+      '<main class="index-view">' +
+        '<section class="masthead">' +
+          '<p class="eyebrow">Registry change monitor — index</p>' +
+          "<h1><span class=\"counter\">" + changedCount + "</span> trial" + (changedCount === 1 ? "" : "s") +
+            " changed " + (changedCount === 1 ? "its" : "their") + " primary outcome after enrolment began</h1>" +
+          '<p class="tagline">Every version below was public the entire time.</p>' +
+        "</section>" +
+        '<section class="filters" role="group" aria-label="Filter trials">' + chipsHtml + "</section>" +
+        '<div class="table-wrap"><table class="ledger" id="ledger">' +
+          "<thead><tr>" +
+            '<th data-sort="nctId">Trial<span class="sort-arrow"></span></th>' +
+            '<th data-sort="changeType">Change<span class="sort-arrow"></span></th>' +
+            '<th data-sort="severity">Severity<span class="sort-arrow"></span></th>' +
+            '<th data-sort="sponsorClass">Sponsor class<span class="sort-arrow"></span></th>' +
+            '<th data-sort="phase">Phase<span class="sort-arrow"></span></th>' +
+            '<th data-sort="daysAfterEnrolment">Days after enrolment<span class="sort-arrow"></span></th>' +
+          "</tr></thead><tbody></tbody>" +
+        "</table></div>" +
+      "</main>";
+
+    wireIndexInteractions(summaries);
+    renderLedgerRows(summaries);
+  }
+
+  function applyIndexFilters(summaries) {
+    return summaries.filter((s) =>
+      ["severity", "changeType", "sponsorClass"].every((key) =>
+        indexFilters[key].size === 0 || indexFilters[key].has(s[key])
+      ) &&
+      (indexFilters.phase.size === 0 || indexFilters.phase.has(phaseLabel(s.phase)))
+    );
+  }
+
+  function renderLedgerRows(summaries) {
+    const rows = applyIndexFilters(summaries).slice().sort((a, b) => {
+      const av = a[indexSort.key], bv = b[indexSort.key];
+      if (av < bv) return -1 * indexSort.dir;
+      if (av > bv) return 1 * indexSort.dir;
+      return 0;
+    });
+    const tbody = document.querySelector("#ledger tbody");
+    tbody.innerHTML = rows.length ? rows.map((s) =>
+      '<tr data-nct="' + s.nctId + '" tabindex="0">' +
+        '<td><span class="nct-link mono">' + s.nctId + "</span><br>" + escapeHtml(s.briefTitle) + "</td>" +
+        "<td>" + escapeHtml(s.changeType) + "</td>" +
+        '<td><span class="tag severity-' + s.severity.toLowerCase() + '">' + s.severity + "</span></td>" +
+        "<td>" + s.sponsorClass + "</td>" +
+        "<td>" + phaseLabel(s.phase) + "</td>" +
+        '<td class="mono">' + fmtDaysAfterEnrolment(s.daysAfterEnrolment) + "</td>" +
+      "</tr>"
+    ).join("") : '<tr class="empty-row"><td colspan="6">No trials match the selected filters.</td></tr>';
+
+    tbody.querySelectorAll("tr[data-nct]").forEach((tr) => {
+      const go = () => { location.hash = "#/trial/" + tr.dataset.nct; };
+      tr.addEventListener("click", go);
+      tr.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+    });
+  }
+
+  function wireIndexInteractions(summaries) {
+    document.querySelectorAll(".chip").forEach((chip) => {
+      chip.addEventListener("click", () => {
+        const { filterKey, filterValue } = chip.dataset;
+        const set = indexFilters[filterKey];
+        set.has(filterValue) ? set.delete(filterValue) : set.add(filterValue);
+        chip.setAttribute("aria-pressed", set.has(filterValue));
+        renderLedgerRows(summaries);
+      });
+    });
+    document.querySelectorAll("#ledger th[data-sort]").forEach((th) => {
+      th.addEventListener("click", () => {
+        const key = th.dataset.sort;
+        indexSort.dir = indexSort.key === key ? -indexSort.dir : 1;
+        indexSort.key = key;
+        document.querySelectorAll("#ledger th .sort-arrow").forEach((a) => (a.textContent = ""));
+        th.querySelector(".sort-arrow").textContent = indexSort.dir === 1 ? "↑" : "↓";
+        renderLedgerRows(summaries);
+      });
+    });
+  }
+
+/* =========================================================================
+   6. TRIAL VIEW — the scrubber
+   ========================================================================= */
+  let activeScrubber = null; // {next(), prev()} for the currently mounted trial view, or null
+
+  function nodePercent(i, n) {
+    if (n <= 1) return 50;
+    const pad = 7;
+    return pad + (i / (n - 1)) * (100 - 2 * pad);
+  }
+
+  // Places a reference date honestly relative to the (evenly spaced) version
+  // nodes by interpolating between whichever two fetched versions bracket it.
+  function refLinePercent(dateISO, versions) {
+    const t = new Date(dateISO).getTime();
+    const n = versions.length;
+    if (t <= new Date(versions[0].date).getTime()) return nodePercent(0, n);
+    if (t >= new Date(versions[n - 1].date).getTime()) return nodePercent(n - 1, n);
+    for (let i = 0; i < n - 1; i++) {
+      const t0 = new Date(versions[i].date).getTime();
+      const t1 = new Date(versions[i + 1].date).getTime();
+      if (t >= t0 && t <= t1) {
+        const frac = t1 === t0 ? 0 : (t - t0) / (t1 - t0);
+        return nodePercent(i, n) + frac * (nodePercent(i + 1, n) - nodePercent(i, n));
+      }
+    }
+    return 50;
+  }
+
+  async function renderTrialView(nctId) {
+    const app = document.getElementById("app");
+    const trial = await getTrial(nctId);
+    if (!trial) {
+      app.innerHTML = topbarHtml() +
+        '<main><a class="back-link" href="#/">&larr; All trials</a>' +
+        "<p>No hardcoded data for " + escapeHtml(nctId) + " yet.</p></main>";
+      return;
+    }
+
+    const n = trial.versions.length;
+    const nodesHtml = trial.versions.map((v, i) =>
+      '<div class="v-marker" style="left:' + nodePercent(i, n) + '%">' +
+        '<button class="v-node" data-index="' + i + '" aria-pressed="false" ' +
+          'aria-label="Version ' + v.version + ", " + v.date + '"></button>' +
+        '<span class="v-label mono">v' + v.version + "</span>" +
+      "</div>"
+    ).join("");
+
+    const enrolPct = refLinePercent(trial.enrolmentStart, trial.versions);
+    const compPct = refLinePercent(trial.primaryCompletion, trial.versions);
+
+    app.innerHTML =
+      topbarHtml() +
+      '<main class="trial-view">' +
+        '<a class="back-link" href="#/">&larr; All trials</a>' +
+        '<div class="trial-header">' +
+          '<div class="trial-id-row">' +
+            '<span class="nct-id mono">' + trial.nctId + "</span>" +
+            '<span class="status-pill" id="status-pill"></span>' +
+          "</div>" +
+          '<h1 class="trial-title">' + escapeHtml(trial.briefTitle) + "</h1>" +
+          '<p class="trial-official">' + escapeHtml(trial.officialTitle) + "</p>" +
+          '<div class="trial-meta">' +
+            "<span><strong>" + escapeHtml(trial.sponsor) + "</strong></span>" +
+            "<span>" + phaseLabel(trial.phase) + "</span>" +
+            "<span>Enrolment began <strong class=\"mono\">" + trial.enrolmentStart + "</strong></span>" +
+            "<span>Primary completion (actual) <strong class=\"mono\">" + trial.primaryCompletion + "</strong></span>" +
+          "</div>" +
+        "</div>" +
+
+        '<section class="scrubber" aria-label="Version scrubber">' +
+          '<div class="scrubber-scroll"><div class="scrubber-track">' +
+            '<div class="timeline-baseline"></div>' +
+            '<div class="ref-line" style="left:' + enrolPct + '%"><span class="ref-label">Enrolment began</span></div>' +
+            '<div class="ref-line" style="left:' + compPct + '%"><span class="ref-label">Primary completion</span></div>' +
+            nodesHtml +
+            '<div class="playhead" id="playhead" style="left:' + nodePercent(0, n) + '%"></div>' +
+          "</div></div>" +
+        "</section>" +
+
+        '<div class="readout">' +
+          '<span class="readout-version mono" id="readout-version"></span>' +
+          '<span class="readout-date mono" id="readout-date"></span>' +
+          '<span class="readout-days mono" id="readout-days"></span>' +
+          '<span class="readout-status" id="readout-status"></span>' +
+        "</div>" +
+
+        '<div class="outcome-panel">' +
+          '<div class="card primary-card">' +
+            '<p class="card-label">Primary outcome</p>' +
+            '<p class="primary-measure" id="primary-measure"></p>' +
+            '<p class="primary-timeframe mono" id="primary-timeframe"></p>' +
+            '<p class="primary-description" id="primary-description"></p>' +
+            '<div class="primary-extra" id="primary-extra" hidden></div>' +
+            '<p class="deep-links" id="deep-links"></p>' +
+          "</div>" +
+          '<div class="card">' +
+            '<p class="card-label">Secondary outcomes (<span id="secondary-count"></span>)</p>' +
+            '<ul class="secondary-list" id="secondary-list"></ul>' +
+            '<div class="secondary-removed" id="secondary-removed" hidden>' +
+              '<p class="card-label">No longer measured</p>' +
+              "<ul></ul>" +
+            "</div>" +
+          "</div>" +
+        "</div>" +
+      "</main>";
+
+    initScrubber(trial);
+  }
+
+  function initScrubber(trial) {
+    const n = trial.versions.length;
+    const track = document.querySelector(".scrubber-track");
+    const playhead = document.getElementById("playhead");
+    const nodeButtons = [...track.querySelectorAll(".v-node")];
+    let idx = 0;
+
+    function select(i, opts) {
+      idx = Math.max(0, Math.min(n - 1, i));
+      nodeButtons.forEach((b, j) => b.setAttribute("aria-pressed", j === idx));
+      playhead.style.left = nodePercent(idx, n) + "%";
+      renderOutcomePanel(trial, idx);
+      if (opts && opts.focus) nodeButtons[idx].focus();
+    }
+
+    nodeButtons.forEach((b, i) => b.addEventListener("click", () => select(i)));
+
+    function xToIndex(clientX) {
+      const rect = track.getBoundingClientRect();
+      const pct = ((clientX - rect.left) / rect.width) * 100;
+      let best = 0, bestDist = Infinity;
+      trial.versions.forEach((_, i) => {
+        const d = Math.abs(nodePercent(i, n) - pct);
+        if (d < bestDist) { bestDist = d; best = i; }
+      });
+      return best;
+    }
+
+    let dragging = false;
+    track.addEventListener("pointerdown", (e) => {
+      dragging = true;
+      track.setPointerCapture(e.pointerId);
+      select(xToIndex(e.clientX));
+    });
+    track.addEventListener("pointermove", (e) => { if (dragging) select(xToIndex(e.clientX)); });
+    track.addEventListener("pointerup", () => { dragging = false; });
+    track.addEventListener("pointercancel", () => { dragging = false; });
+
+    activeScrubber = {
+      next: () => select(idx + 1, { focus: true }),
+      prev: () => select(idx - 1, { focus: true })
+    };
+
+    select(0);
+  }
+
+  // Single persistent listener (not re-added per render) driven by activeScrubber,
+  // which is null whenever no trial view is mounted.
+  window.addEventListener("keydown", (e) => {
+    if (!activeScrubber) return;
+    if (e.key === "ArrowRight") { activeScrubber.next(); e.preventDefault(); }
+    else if (e.key === "ArrowLeft") { activeScrubber.prev(); e.preventDefault(); }
+  });
+
+  function timingClass(daysAfterEnrolment, daysAfterCompletion) {
+    if (daysAfterCompletion > 0) return "after-completion";
+    if (daysAfterEnrolment >= 0) return "after-enrolment";
+    return "";
+  }
+
+  function diffSecondaryList(prevList, curList) {
+    const prevMeasures = new Set((prevList || []).map((o) => o.measure));
+    const removed = (prevList || []).filter((o) => !curList.some((c) => c.measure === o.measure));
+    return { removed, isNew: (o) => prevList !== null && !prevMeasures.has(o.measure) };
+  }
+
+  function renderOutcomePanel(trial, idx) {
+    const cur = trial.versions[idx];
+    const prev = idx > 0 ? trial.versions[idx - 1] : null;
+    const daysAfterEnrolment = daysBetween(cur.date, trial.enrolmentStart);
+    const daysAfterCompletion = daysBetween(cur.date, trial.primaryCompletion);
+
+    document.getElementById("readout-version").textContent = "v" + cur.version;
+    document.getElementById("readout-date").textContent = cur.date;
+    const daysEl = document.getElementById("readout-days");
+    daysEl.textContent = fmtDaysAfterEnrolment(daysAfterEnrolment);
+    daysEl.className = "readout-days mono " + timingClass(daysAfterEnrolment, daysAfterCompletion);
+    document.getElementById("readout-status").textContent = cur.overallStatus.replace(/_/g, " ");
+    document.getElementById("status-pill").textContent = cur.overallStatus.replace(/_/g, " ");
+
+    const curP = cur.primaryOutcomes[0] || { measure: "—", description: "", timeFrame: "—" };
+    const prevP = prev ? (prev.primaryOutcomes[0] || { measure: "", description: "", timeFrame: "" }) : null;
+    document.getElementById("primary-measure").innerHTML = renderDiff(prevP && prevP.measure, curP.measure);
+    document.getElementById("primary-timeframe").innerHTML = renderDiff(prevP && prevP.timeFrame, curP.timeFrame);
+    document.getElementById("primary-description").innerHTML = renderDiff(prevP && prevP.description, curP.description);
+
+    const extraEl = document.getElementById("primary-extra");
+    const extras = cur.primaryOutcomes.slice(1);
+    if (extras.length) {
+      extraEl.hidden = false;
+      extraEl.innerHTML = '<p class="card-label">Additional primary outcomes</p>' +
+        extras.map((o) => '<p class="primary-extra-item">' + escapeHtml(o.measure) +
+          '<span class="badge">' + escapeHtml(o.timeFrame) + "</span></p>").join("");
+    } else {
+      extraEl.hidden = true;
+    }
+
+    const { removed, isNew } = diffSecondaryList(prev ? prev.secondaryOutcomes : null, cur.secondaryOutcomes);
+    document.getElementById("secondary-count").textContent = cur.secondaryOutcomes.length;
+    document.getElementById("secondary-list").innerHTML = cur.secondaryOutcomes.map((o) =>
+      '<li class="' + (isNew(o) ? "is-new" : "") + '"><span class="sec-measure">' + escapeHtml(o.measure) +
+      '</span><span class="sec-timeframe mono">' + escapeHtml(o.timeFrame) + "</span></li>"
+    ).join("");
+    const removedWrap = document.getElementById("secondary-removed");
+    if (removed.length) {
+      removedWrap.hidden = false;
+      removedWrap.querySelector("ul").innerHTML = removed.map((o) =>
+        "<li><del>" + escapeHtml(o.measure) + "</del></li>").join("");
+    } else {
+      removedWrap.hidden = true;
+    }
+
+    const linksEl = document.getElementById("deep-links");
+    linksEl.innerHTML = "Compare on ClinicalTrials.gov: " +
+      (prev ? '<a href="' + trial.historyUrl + '" target="_blank" rel="noopener">v' + prev.version + " · " + prev.date + " ↗</a> vs " : "") +
+      '<a href="' + trial.historyUrl + '" target="_blank" rel="noopener">v' + cur.version + " · " + cur.date + " ↗</a>";
+  }
+</script>
+</body>
+</html>
