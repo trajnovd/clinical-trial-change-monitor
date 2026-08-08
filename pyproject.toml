@@ -1,0 +1,15 @@
+[project]
+name = "ctcm"
+version = "0.1.0"
+description = "Clinical Trial Registry Change Monitor"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx",
+    "pydantic",
+    "fastapi",
+    "uvicorn",
+    "pytest",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
