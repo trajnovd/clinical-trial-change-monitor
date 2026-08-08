@@ -12,6 +12,7 @@ from datetime import date
 from pydantic import BaseModel
 
 from ctcm import config, db
+from ctcm.normalize import norm
 
 OUTCOME_KEYS = (("PRIMARY", "primaryOutcomes"), ("SECONDARY", "secondaryOutcomes"), ("OTHER", "otherOutcomes"))
 
@@ -181,7 +182,7 @@ def load_corpus() -> None:
                 conn.execute(
                     "INSERT OR REPLACE INTO outcomes(nct_id, version_no, outcome_type, ordinal, measure, "
                     "description, time_frame, measure_norm) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (nct, version_no, o.outcome_type, o.ordinal, o.measure, o.description, o.time_frame, None),
+                    (nct, version_no, o.outcome_type, o.ordinal, o.measure, o.description, o.time_frame, norm(o.measure)),
                 )
 
         if last_meta is not None:

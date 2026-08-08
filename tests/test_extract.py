@@ -1,8 +1,10 @@
+import gzip
 import json
 from datetime import date
 from pathlib import Path
 
-from ctcm.extract import extract_snapshot
+from ctcm import config, db
+from ctcm.extract import _parse_date, extract_snapshot, load_corpus
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -36,3 +38,35 @@ def test_extract_missing_modules_never_raises():
     snap = extract_snapshot({"protocolSection": {"outcomesModule": {}}})
     assert snap.outcomes == []
     assert snap.timeline.start_date is None
+
+
+def test_parse_date_lenient_month_and_year_only():
+    assert _parse_date("2020-03-12") == date(2020, 3, 12)
+    assert _parse_date("2020-03") == date(2020, 3, 1)  # missing day -> day 1
+    assert _parse_date("2020") == date(2020, 1, 1)
+    assert _parse_date(None) is None
+    assert _parse_date("") is None
+    assert _parse_date("not-a-date") is None
+
+
+def test_load_corpus_twice_keeps_measure_norm_populated(tmp_path, monkeypatch):
+    # Regression: a bare re-run of load_corpus() must not null out measure_norm --
+    # it's the expected workflow once the background ingest adds more trials.
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "test.db")
+
+    raw = json.loads((FIXTURES / "actt1_v0.json").read_text())
+    trial_dir = config.CACHE_DIR / "NCT04280705"
+    trial_dir.mkdir(parents=True)
+    history = {"changes": [{"version": 0, "date": "2020-02-20", "moduleLabels": []}]}
+    (trial_dir / "history.json").write_text(json.dumps(history))
+    (trial_dir / "v0.json.gz").write_bytes(gzip.compress(json.dumps(raw).encode()))
+
+    load_corpus()
+    load_corpus()
+
+    conn = db.connect()
+    rows = conn.execute("SELECT measure_norm FROM outcomes WHERE nct_id='NCT04280705'").fetchall()
+    assert rows, "expected outcome rows from the fixture"
+    assert all(r["measure_norm"] for r in rows)
