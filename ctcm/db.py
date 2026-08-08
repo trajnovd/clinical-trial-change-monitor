@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS findings(finding_id INTEGER PRIMARY KEY, nct_id TEXT,
   from_version INT, to_version INT, change_type TEXT, severity TEXT,
   before_measure TEXT, after_measure TEXT, days_after_enrolment INT,
   days_after_primary_completion INT, confidence REAL, resolved_by TEXT, rationale TEXT);
+CREATE TABLE IF NOT EXISTS llm_cache(key TEXT PRIMARY KEY, response TEXT);
 """
 
 
