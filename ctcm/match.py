@@ -234,9 +234,25 @@ def match_outcomes(before: list[OutcomeRow], after: list[OutcomeRow], t3=None) -
     pairs: list[Pair] = []
     final_tier: dict[tuple[int, int], str] = {}
     final_score: dict[tuple[int, int], float] = {}
+    # Per-item best-attempted rejection, for leftovers with >1 item on either side
+    # (where no single cross-pairing is unambiguous -- see Pass C). Both passes below
+    # walk candidates in strictly descending score order, so setdefault on first write
+    # captures each item's highest-scoring (best-attempted) comparison.
+    best_tier_b: dict[int, str] = {}
+    best_tier_a: dict[int, str] = {}
+    best_score_b: dict[int, float] = {}
+    best_score_a: dict[int, float] = {}
 
     def bump(tier: str) -> None:
         tier_counts[tier] = tier_counts.get(tier, 0) + 1
+
+    def reject(bi: int, ai: int, tier: str, score: float) -> None:
+        final_tier[(bi, ai)] = tier
+        final_score[(bi, ai)] = score
+        best_tier_b.setdefault(bi, tier)
+        best_score_b.setdefault(bi, score)
+        best_tier_a.setdefault(ai, tier)
+        best_score_a.setdefault(ai, score)
 
     # Pass A: score every candidate (cheap: exact-match check or Jaccard only), then
     # walk highest-score-first, resolving T0/T1/T2 as each candidate is reached.
@@ -268,8 +284,7 @@ def match_outcomes(before: list[OutcomeRow], after: list[OutcomeRow], t3=None) -
             used_a.add(ai)
             bump(tier)
         elif score <= T1_LOW:
-            final_tier[(bi, ai)] = "T1"
-            final_score[(bi, ai)] = score
+            reject(bi, ai, "T1", score)
         elif t2_relation:
             pairs.append(Pair(bi, ai, t2_relation, "T2", score))
             used_b.add(bi)
@@ -284,26 +299,25 @@ def match_outcomes(before: list[OutcomeRow], after: list[OutcomeRow], t3=None) -
         if bi in used_b or ai in used_a:
             continue
         b, a = before[bi], after[ai]
-        final_score[(bi, ai)] = score
 
         if t3 is None:
-            final_tier[(bi, ai)] = "T2_UNRESOLVED"
+            reject(bi, ai, "T2_UNRESOLVED", score)
             bump("T2_UNRESOLVED")
             continue
         try:
             result = t3(b, a)
         except T3BudgetExceeded:
-            final_tier[(bi, ai)] = "T2_UNRESOLVED"
+            reject(bi, ai, "T2_UNRESOLVED", score)
             bump("T2_UNRESOLVED")
             continue
         except Exception:
-            final_tier[(bi, ai)] = "T3_FALLBACK"
+            reject(bi, ai, "T3_FALLBACK", score)
             bump("T3_FALLBACK")
             continue
 
         relation = result.get("relation") if result else None
         if relation not in ALL_RELATIONS:
-            final_tier[(bi, ai)] = "T3_FALLBACK"
+            reject(bi, ai, "T3_FALLBACK", score)
             bump("T3_FALLBACK")
             continue
 
@@ -314,12 +328,13 @@ def match_outcomes(before: list[OutcomeRow], after: list[OutcomeRow], t3=None) -
             used_b.add(bi)
             used_a.add(ai)
         else:
-            final_tier[(bi, ai)] = "T3"
+            reject(bi, ai, "T3", score)
 
     # Pass C: whatever's left is a genuine leftover. An unambiguous single leftover on
     # each side is worth naming as an explicit DIFFERENT pair (mirrors diff_pair's own
     # "only collapse the unambiguous 1:1 case" philosophy); anything else stays
-    # independent rather than inventing a specific cross-pairing.
+    # independent, tagged with each item's own best-attempted tier/score rather than a
+    # guessed cross-pairing.
     unmatched_b = [bi for bi in range(len(before)) if bi not in used_b]
     unmatched_a = [ai for ai in range(len(after)) if ai not in used_a]
     if len(unmatched_b) == 1 and len(unmatched_a) == 1:
@@ -329,8 +344,8 @@ def match_outcomes(before: list[OutcomeRow], after: list[OutcomeRow], t3=None) -
         pairs.append(Pair(bi, ai, "DIFFERENT", tier, score))
     else:
         for bi in unmatched_b:
-            pairs.append(Pair(bi, None, "DIFFERENT", "T1", 0.0))
+            pairs.append(Pair(bi, None, "DIFFERENT", best_tier_b.get(bi, "T1"), best_score_b.get(bi, 0.0)))
         for ai in unmatched_a:
-            pairs.append(Pair(None, ai, "DIFFERENT", "T1", 0.0))
+            pairs.append(Pair(None, ai, "DIFFERENT", best_tier_a.get(ai, "T1"), best_score_a.get(ai, 0.0)))
 
     return MatchResult(pairs, tier_counts)

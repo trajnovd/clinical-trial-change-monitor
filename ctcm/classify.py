@@ -178,10 +178,25 @@ def _rationale(change_type: str, vfrom: int, vto: int, before_measure: str | Non
     return f"{change_type}: '{before_measure}' removed ({when}, v{vfrom}->v{vto})."
 
 
-def classify(nct: str, vfrom: int, vto: int, vdate: date, changes: list[RawChange], anchors_obj: Anchors) -> list[Finding]:
+def classify(
+    nct: str,
+    vfrom: int,
+    vto: int,
+    vdate: date,
+    changes: list[RawChange],
+    anchors_obj: Anchors,
+    tiers: dict[int, str] | None = None,
+) -> list[Finding]:
     """Maps RawChanges to severity-scored Findings. Only changes touching a PRIMARY
     outcome (on either side) are in scope -- everything else is outside the taxonomy
-    and, per global-constraints.md, not emitted (NOISE suppressed by construction)."""
+    and, per global-constraints.md, not emitted (NOISE suppressed by construction).
+
+    `tiers`, if given, maps id(RawChange) -> the cascade tier that decided it (v0.3;
+    see ctcm/match.py) and is stamped onto Finding.resolved_by. Optional and keyed by
+    object identity rather than added as a RawChange field, so diff_pair's matcher
+    contract and every existing caller stay untouched; omitted (v0.2 callers, and
+    every existing test) defaults every Finding to "T0" exactly as before."""
+    tiers = tiers or {}
     findings = []
     for c in changes:
         touches_primary = (c.before is not None and c.before.outcome_type == PRIMARY) or (
@@ -192,12 +207,13 @@ def classify(nct: str, vfrom: int, vto: int, vdate: date, changes: list[RawChang
 
         before_measure = c.before.measure if c.before else None
         after_measure = c.after.measure if c.after else None
+        tier = tiers.get(id(c), "T0")
 
         if c.kind == "REWORDED":
             # CONTEXT unconditionally: no semantic change, timing doesn't matter (TECH-PRD §6.1).
             findings.append(
                 Finding(
-                    nct, vfrom, vto, "REWORDED", "CONTEXT", before_measure, after_measure, None, None, 1.0, "T0",
+                    nct, vfrom, vto, "REWORDED", "CONTEXT", before_measure, after_measure, None, None, 1.0, tier,
                     _rationale("REWORDED", vfrom, vto, before_measure, after_measure, None),
                 )
             )
@@ -219,7 +235,7 @@ def classify(nct: str, vfrom: int, vto: int, vdate: date, changes: list[RawChang
 
         findings.append(
             Finding(
-                nct, vfrom, vto, change_type, severity, before_measure, after_measure, days_enrol, days_pcd, 1.0, "T0",
+                nct, vfrom, vto, change_type, severity, before_measure, after_measure, days_enrol, days_pcd, 1.0, tier,
                 _rationale(change_type, vfrom, vto, before_measure, after_measure, days_enrol),
             )
         )
