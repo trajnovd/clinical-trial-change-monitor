@@ -17,8 +17,15 @@ def main() -> None:
     ).fetchone()
 
     print(f"corpus: {n_trials} trials")
-    print(f"trials with >=1 post-enrolment primary change: {n_signal}")
+    print(f"HEADLINE -- trials with >=1 post-enrolment primary change: {n_signal}")
     print(f"trials with >=1 post-completion change: {n_post_completion}")
+    print(
+        "  caveat: this corpus is results-posted trials only (ingest discovery query "
+        "requires ResultsFirstPostDate) -- sponsors routinely add/adjust outcome rows "
+        "around results entry as registry housekeeping, not editorial endpoint-switching, "
+        "so POST_COMPLETION_CHANGE is an upper bound, not a purity signal. Lead with the "
+        "post-enrolment-primary-change number above instead."
+    )
 
     print("\nby change_type:")
     for row in conn.execute("SELECT change_type, COUNT(*) AS n FROM findings GROUP BY change_type ORDER BY n DESC"):

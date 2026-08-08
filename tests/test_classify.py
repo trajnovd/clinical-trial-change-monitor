@@ -86,6 +86,56 @@ def test_diff_pair_pure_removal_no_matching_addition():
     assert changes[0].after is None
 
 
+# ---- pluggable matcher: relation flows through to the RawChange kind --------------
+# Fake matchers standing in for v0.3's semantic cascade, proving diff_pair actually
+# consumes the relation rather than only ever checking `== "SAME"`.
+
+
+def test_diff_pair_matcher_narrowed_relation_flows_to_narrowed_kind():
+    before = [_row("PRIMARY", 0, "All-cause mortality")]
+    after = [_row("PRIMARY", 0, "Cardiovascular mortality")]
+    changes = diff_pair(before, after, lambda b, a: "NARROWED")
+    assert len(changes) == 1
+    assert changes[0].kind == "NARROWED"
+
+
+def test_diff_pair_matcher_timepoint_changed_relation_flows_to_timepoint_kind():
+    before = [_row("PRIMARY", 0, "Overall survival", time_frame="at 12 months")]
+    after = [_row("PRIMARY", 0, "Overall survival", time_frame="at 24 months")]
+    changes = diff_pair(before, after, lambda b, a: "TIMEPOINT_CHANGED")
+    assert len(changes) == 1
+    assert changes[0].kind == "TIMEPOINT"
+
+
+def test_diff_pair_matcher_reworded_relation_flows_to_reworded_kind():
+    before = [_row("PRIMARY", 0, "OS")]
+    after = [_row("PRIMARY", 0, "Overall survival")]
+    changes = diff_pair(before, after, lambda b, a: "REWORDED")
+    assert len(changes) == 1
+    assert changes[0].kind == "REWORDED"
+
+
+def test_diff_pair_matcher_different_relation_is_not_a_match():
+    # DIFFERENT must be treated like None (no match), never like a matched relation.
+    before = [_row("PRIMARY", 0, "Some measure")]
+    after = [_row("PRIMARY", 0, "Unrelated measure")]
+    changes = diff_pair(before, after, lambda b, a: "DIFFERENT")
+    # unmatched 1:1 same-type -> collapses via the ADDED/REMOVED->REPLACED path,
+    # not via the matched-pair path -- proving DIFFERENT never counted as a match.
+    assert len(changes) == 1
+    assert changes[0].kind == "REPLACED"
+
+
+def test_classify_narrowed_relation_maps_to_primary_narrowed_signal():
+    before = [_row("PRIMARY", 0, "All-cause mortality")]
+    after = [_row("PRIMARY", 0, "Cardiovascular mortality")]
+    changes = diff_pair(before, after, lambda b, a: "NARROWED")
+    findings = classify("NCT1", 0, 1, date(2020, 4, 16), changes, ANCHORS_POST_ENROL)
+    assert len(findings) == 1
+    assert findings[0].change_type == "PRIMARY_NARROWED"
+    assert findings[0].severity == "SIGNAL"
+
+
 # ---- classify -----------------------------------------------------------------------
 
 ANCHORS_POST_ENROL = Anchors(start=date(2020, 2, 21), start_type="ACTUAL", pcd=date(2020, 12, 1), pcd_type="ESTIMATED", revisions=[])
@@ -192,15 +242,64 @@ def test_classify_primary_added_with_no_prior_primary():
     assert findings[0].severity == "SIGNAL"
 
 
-def test_classify_extra_added_beyond_collapse_count_stays_primary_added():
-    # 1 removed + 2 added, same type: one pair collapses to REPLACED, the
-    # leftover addition stays PRIMARY_ADDED.
+def test_classify_ambiguous_1_removed_2_added_stays_independent_not_replaced():
+    # 1 removed + 2 added, same type: which removed measure (if either) the two
+    # additions correspond to isn't knowable -- must NOT guess a REPLACED pairing.
     before = [_row("PRIMARY", 0, "Dropped endpoint")]
-    after = [_row("PRIMARY", 0, "Replacement endpoint"), _row("PRIMARY", 1, "Bonus new endpoint")]
+    after = [_row("PRIMARY", 0, "New endpoint one"), _row("PRIMARY", 1, "New endpoint two")]
     changes = diff_pair(before, after, t0_matcher)
     findings = classify("NCT1", 0, 1, date(2020, 4, 16), changes, ANCHORS_POST_ENROL)
     codes = sorted(f.change_type for f in findings)
-    assert codes == ["PRIMARY_ADDED", "PRIMARY_REPLACED"]
+    assert codes == ["PRIMARY_ADDED", "PRIMARY_ADDED", "PRIMARY_REMOVED"]
+    assert all(f.change_type != "PRIMARY_REPLACED" for f in findings)
+
+
+def test_diff_pair_actt1_v9_to_v14_shape_no_ambiguous_collapse():
+    # Regression for the reviewer-verified false positive on NCT01434602 v0->v14:
+    # 2 unmatched PRIMARYs before, 4 unmatched PRIMARYs after (real reworded/reordered
+    # endpoints, none exact-norm-matching) -- must stay independent REMOVED/ADDED,
+    # never cross-paired into REPLACED by array position.
+    before = [
+        _row("PRIMARY", 0, "Six-month Progression Free Survival (PFS)"),
+        _row("PRIMARY", 1, "Maximum Tolerated Dose (MTD)"),
+    ]
+    after = [
+        _row("PRIMARY", 0, "To determine the maximum tolerated dose and safety of everolimus"),
+        _row("PRIMARY", 1, "6 month progression free survival rate for glioblastoma patients"),
+        _row("PRIMARY", 2, "3 month progression free survival rate for glioblastoma patients"),
+        _row("PRIMARY", 3, "6 month progression free survival rate for AG patients"),
+    ]
+    changes = diff_pair(before, after, t0_matcher)
+    kinds = sorted(c.kind for c in changes)
+    assert kinds == ["ADDED", "ADDED", "ADDED", "ADDED", "REMOVED", "REMOVED"]
+
+
+def test_diff_pair_nct04604795_shape_partial_overlap_no_cross_type_collapse():
+    # Regression for the reviewer-verified false positive on NCT04604795 v0->v4:
+    # 2 outcomes match exactly (consumed, no RawChange); leftover 4 unmatched
+    # before + 4 unmatched after (real AE-monitoring consolidation, unrelated
+    # measures at the same array index) -- must stay independent, not REPLACED.
+    before = [
+        _row("PRIMARY", 0, "Part A: Number of participants with AEs"),
+        _row("PRIMARY", 1, "Part B: Number of participants with AEs"),
+        _row("PRIMARY", 2, "Part C: Number of participants with AEs"),
+        _row("PRIMARY", 3, "Part A: physical examination"),
+        _row("PRIMARY", 4, "Part B: physical examination"),
+        _row("PRIMARY", 5, "Part C: physical examination"),
+    ]
+    after = [
+        _row("PRIMARY", 0, "Part A: Number of participants with AEs"),
+        _row("PRIMARY", 1, "Part B: Number of participants with AEs"),
+        _row("PRIMARY", 2, "Part A: physical examination, vital signs and ECG"),
+        _row("PRIMARY", 3, "Part B: physical examination, vital signs and ECG"),
+        _row("PRIMARY", 4, "Part C: Cmax of GSK3915393"),
+        _row("PRIMARY", 5, "Part C: Tmax of GSK3915393"),
+    ]
+    changes = diff_pair(before, after, t0_matcher)
+    kinds = sorted(c.kind for c in changes)
+    assert kinds == ["ADDED", "ADDED", "ADDED", "ADDED", "REMOVED", "REMOVED", "REMOVED", "REMOVED"]
+    # "Part C: physical examination" must never get paired with "Part C: Cmax of GSK3915393"
+    assert not any(c.kind == "REPLACED" for c in changes)
 
 
 # ---- timeline_revised -----------------------------------------------------------------

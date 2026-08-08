@@ -4,13 +4,18 @@ diff_pair() pairs up outcome rows between two consecutive versions using a
 pluggable matcher and reduces the leftovers into RawChanges. classify() turns
 those RawChanges into severity-scored Findings using timeline anchors.
 
-matcher shape: matcher(before: OutcomeRow, after: OutcomeRow) -> str | None.
-"SAME" means the pair is the same underlying measure (identity across the
-version pair); None means no match. v0.3's semantic cascade returns richer
-relations (SAME/REWORDED/NARROWED/BROADENED/TIMEPOINT_CHANGED/DIFFERENT) from
-the same call signature -- diff_pair doesn't need to change, only its callers
-that read the return type (# ponytail: today only "SAME" is consumed, wiring
-the extra relation values through _classify_matched_pair is v0.3's job).
+Matcher contract: matcher(before: OutcomeRow, after: OutcomeRow) -> str | None,
+called for candidate (before, after) pairs. A return value in _MATCH_RELATIONS
+("SAME", "REWORDED", "NARROWED", "BROADENED", "TIMEPOINT_CHANGED") means "this
+pair is the same underlying measure, related this way" and pairs them; "DIFFERENT"
+or None means no match, and the record stays a candidate for ADDED/REMOVED.
+The relation a matcher returns for a matched pair drives its RawChange kind
+(see _classify_matched_pair): REWORDED -> REWORDED, NARROWED -> NARROWED,
+TIMEPOINT_CHANGED -> TIMEPOINT; SAME/BROADENED fall through to re-deriving the
+kind from outcome_type/raw-text/time_frame, since T0 (which only ever returns
+SAME or None) still needs to detect its own free case-only rewording and
+timepoint-only changes that way. t0_matcher below emits SAME/None only --
+behaviour today is unchanged, v0.3's cascade slots in as a drop-in replacement.
 """
 
 from collections import defaultdict
@@ -57,9 +62,13 @@ class Finding:
     rationale: str
 
 
+_MATCH_RELATIONS = {"SAME", "REWORDED", "NARROWED", "BROADENED", "TIMEPOINT_CHANGED"}
+
+
 def t0_matcher(before: OutcomeRow, after: OutcomeRow) -> str | None:
     """T0: exact measure_norm equality, ~90% of pairs (TECH-PRD §5.3). Anything not
-    byte-identical after normalisation falls through to the ADDED/REMOVED/REPLACED
+    byte-identical after normalisation returns None (no opinion, not "DIFFERENT" --
+    T0 has no rejection tier) and falls through to the ADDED/REMOVED/REPLACED
     collapse in diff_pair -- there's no tier here to call it REWORDED/NARROWED/etc,
     that's what v0.3's embedding + cross-encoder tiers are for."""
     if before.measure_norm and before.measure_norm == after.measure_norm:
@@ -67,14 +76,22 @@ def t0_matcher(before: OutcomeRow, after: OutcomeRow) -> str | None:
     return None
 
 
-def _classify_matched_pair(before: OutcomeRow, after: OutcomeRow) -> RawChange | None:
+def _classify_matched_pair(before: OutcomeRow, after: OutcomeRow, relation: str) -> RawChange | None:
     if before.outcome_type != after.outcome_type:
         if before.outcome_type == PRIMARY:
             return RawChange("DEMOTED", before, after)
         if after.outcome_type == PRIMARY:
             return RawChange("PROMOTED", before, after)
         return None  # e.g. SECONDARY -> OTHER: outside the taxonomy, not interesting
-    if before.measure != after.measure:
+
+    if relation == "NARROWED":
+        return RawChange("NARROWED", before, after)
+    if relation == "TIMEPOINT_CHANGED":
+        return RawChange("TIMEPOINT", before, after)
+    # SAME/REWORDED/BROADENED (or T0's SAME, which is all it ever produces): still
+    # need T0's own free detection of a raw-text-only or time_frame-only change,
+    # since T0 can't tell REWORDED/BROADENED apart from SAME itself.
+    if relation == "REWORDED" or before.measure != after.measure:
         return RawChange("REWORDED", before, after)
     if (before.time_frame or "") != (after.time_frame or ""):
         return RawChange("TIMEPOINT", before, after)
@@ -82,10 +99,16 @@ def _classify_matched_pair(before: OutcomeRow, after: OutcomeRow) -> RawChange |
 
 
 def _collapse_unmatched(unmatched_before: list[OutcomeRow], unmatched_after: list[OutcomeRow]) -> list[RawChange]:
-    """Same outcome_type + same ordinal, on both sides of a version pair with no exact
-    match: that's one measure replaced by another, not an independent add + remove.
-    # ponytail: ordinal-position pairing; a same-version reorder of unrelated outcomes
-    would misfire as REPLACED -- upgrade to matcher-assisted pairing if that shows up."""
+    """Same outcome_type, with no exact match: collapse to REPLACED only when
+    exactly one is left on each side -- an unambiguous 1:1 swap. Two or more
+    leftovers on either side is ambiguous (which removed measure corresponds to
+    which added one isn't knowable without a similarity check), so each stays an
+    independent ADDED/REMOVED rather than guessing a specific pairing by array
+    position -- a wrong specific claim ("X replaced by Y") is worse than an honest
+    "don't know" one (X removed, Y added).
+    # ponytail: only the unambiguous 1:1 case collapses; matcher-assisted pairing
+    # for the N:M case is v0.3's job once relations beyond SAME exist.
+    """
     by_type_before = defaultdict(list)
     for b in unmatched_before:
         by_type_before[b.outcome_type].append(b)
@@ -95,28 +118,38 @@ def _collapse_unmatched(unmatched_before: list[OutcomeRow], unmatched_after: lis
 
     changes = []
     for outcome_type in set(by_type_before) | set(by_type_after):
-        bs = sorted(by_type_before.get(outcome_type, []), key=lambda r: r.ordinal)
-        as_ = sorted(by_type_after.get(outcome_type, []), key=lambda r: r.ordinal)
-        n = min(len(bs), len(as_))
-        changes.extend(RawChange("REPLACED", bs[i], as_[i]) for i in range(n))
-        changes.extend(RawChange("REMOVED", b, None) for b in bs[n:])
-        changes.extend(RawChange("ADDED", None, a) for a in as_[n:])
+        bs = by_type_before.get(outcome_type, [])
+        as_ = by_type_after.get(outcome_type, [])
+        if len(bs) == 1 and len(as_) == 1:
+            changes.append(RawChange("REPLACED", bs[0], as_[0]))
+            continue
+        changes.extend(RawChange("REMOVED", b, None) for b in bs)
+        changes.extend(RawChange("ADDED", None, a) for a in as_)
     return changes
 
 
 def diff_pair(before: list[OutcomeRow], after: list[OutcomeRow], matcher) -> list[RawChange]:
-    """Consumes match.match_outcomes (Task 7); v0.2 passes t0_matcher."""
+    """Consumes match.match_outcomes (Task 7); v0.2 passes t0_matcher. See the
+    module docstring for the matcher contract."""
     used_after: set[int] = set()
     changes: list[RawChange] = []
     unmatched_before: list[OutcomeRow] = []
 
     for b in before:
-        matched_i = next((i for i, a in enumerate(after) if i not in used_after and matcher(b, a) == "SAME"), None)
-        if matched_i is None:
+        matched = None
+        for i, a in enumerate(after):
+            if i in used_after:
+                continue
+            relation = matcher(b, a)
+            if relation in _MATCH_RELATIONS:
+                matched = (i, a, relation)
+                break
+        if matched is None:
             unmatched_before.append(b)
             continue
-        used_after.add(matched_i)
-        change = _classify_matched_pair(b, after[matched_i])
+        i, a, relation = matched
+        used_after.add(i)
+        change = _classify_matched_pair(b, a, relation)
         if change is not None:
             changes.append(change)
 
@@ -132,6 +165,7 @@ _CODE_BY_KIND = {
     "TIMEPOINT": "TIMEPOINT_CHANGED",
     "ADDED": "PRIMARY_ADDED",
     "REMOVED": "PRIMARY_REMOVED",
+    "NARROWED": "PRIMARY_NARROWED",  # unreachable at T0 -- t0_matcher never returns "NARROWED"
 }
 
 
