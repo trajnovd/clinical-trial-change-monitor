@@ -293,11 +293,22 @@ def match_outcomes(before: list[OutcomeRow], after: list[OutcomeRow], t3=None) -
         else:
             escalated.append((score, bi, ai))  # T0-T2 could not decide -- T3's job
 
-    # Pass B: T3 sees only the residual escalated candidates, and only for rows still
-    # unmatched by the time we get to them (best-first order).
+    # Pass B: T3 sees only the residual escalated candidates, best-first, and each item
+    # gets at most one T3 shot (its single best-scoring remaining candidate) rather than
+    # one per candidate it appears in. Without this cap, a before-item sitting in a
+    # crowded outcome list can rack up an LLM call against every moderately-similar
+    # after-item before giving up on all of them -- the same waste the whole cascade
+    # exists to avoid. # ponytail: one shot per item, not a full re-search after a miss;
+    # revisit with a real similarity model if this measurably starves a genuine match.
+    escalation_tried_b: set[int] = set()
+    escalation_tried_a: set[int] = set()
     for score, bi, ai in escalated:
         if bi in used_b or ai in used_a:
             continue
+        if bi in escalation_tried_b or ai in escalation_tried_a:
+            continue
+        escalation_tried_b.add(bi)
+        escalation_tried_a.add(ai)
         b, a = before[bi], after[ai]
 
         if t3 is None:
