@@ -204,6 +204,8 @@
   .case-card:hover { border-left-color: var(--accent); background: var(--accent-soft); }
   .case-card-id { font-family: var(--mono); font-weight: 700; font-size: .82rem; }
   .case-card-story { font-size: .85rem; margin-top: .35rem; color: var(--ink); }
+  .case-card-adjudication { font-size: .8rem; margin-top: .5rem; color: var(--ink-muted); }
+  .case-card-adjudication b { color: var(--ink); }
 
   .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--paper-raised); }
   table.ledger { width: 100%; border-collapse: collapse; font-size: .92rem; min-width: 46rem; }
@@ -874,6 +876,20 @@
       .slice(0, 5);
   }
 
+  // Adjudication if present (ui-brief.md): judge's concern level + the one-line
+  // rationale excerpt ctcm/api.py already trimmed to one sentence server-side.
+  // Renders the API's text verbatim (escaped) -- the global banned-word tone
+  // rule (global-constraints.md) is enforced upstream in ctcm/adjudicate.py's
+  // _defuse(), not re-implemented here.
+  function adjudicationLineHtml(adjudication) {
+    if (!adjudication || !adjudication.rationale) return "";
+    const concern = String(adjudication.concern || "").toLowerCase();
+    return (
+      '<p class="case-card-adjudication"><b>Adjudication:</b> ' + escapeHtml(concern) +
+      " concern — " + escapeHtml(adjudication.rationale) + "</p>"
+    );
+  }
+
   function caseStudiesHtml(rows) {
     const picks = pickCaseStudies(rows);
     if (!picks.length) return "";
@@ -881,6 +897,7 @@
       '<a class="case-card" href="#/trial/' + encodeURIComponent(r.nctId) + '">' +
         '<span class="case-card-id mono">' + r.nctId + "</span>" +
         '<p class="case-card-story">' + escapeHtml(r.rationale) + "</p>" +
+        adjudicationLineHtml(r.adjudication) +
       "</a>"
     ).join("");
     return (

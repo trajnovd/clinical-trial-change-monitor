@@ -8,12 +8,15 @@ schema DDL on every call, which is the wrong shape for a read-only request handl
 and would couple this file to db.py's schema-owning code while it's being edited
 elsewhere in parallel. ctcm.timeline is safe to import (pure dataclasses + date math,
 not on the do-not-touch list) and is exactly what the brief asks for: timeline
-anchors computed via ctcm.timeline.anchors.
+anchors computed via ctcm.timeline.anchors. ctcm.adjudicate is stable (commit
+138072b) and its content_hash() is imported rather than reimplemented here, so
+the join key has exactly one definition (see the Adjudications section below).
 """
 
 import gzip
 import html
 import json
+import re
 import sqlite3
 from collections import defaultdict
 
@@ -22,6 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from ctcm import config
+from ctcm.adjudicate import content_hash
 from ctcm.timeline import anchors as compute_anchors
 
 UI_PATH = config.REPO_ROOT / "ui" / "index.html"
@@ -41,7 +45,8 @@ RESULTS_POSTED_CAVEAT = (
 # (severity first, then |days after primary completion|): the row's headline.
 HEADLINE_FINDING_SQL = """
     SELECT nct_id, finding_id, from_version, to_version, change_type, severity,
-           days_after_enrolment, days_after_primary_completion, rationale
+           days_after_enrolment, days_after_primary_completion, rationale,
+           before_measure, after_measure
     FROM (
         SELECT f.*, ROW_NUMBER() OVER (
             PARTITION BY f.nct_id
@@ -98,40 +103,61 @@ def _ue(s: str | None) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Adjudications: table doesn't exist yet (ctcm/adjudicate.py, v0.4, lands
-# separately). Query defensively -- check existence, introspect columns, degrade to
-# "no adjudication data" rather than guess a schema and crash when it's missing.
+# Adjudications: keyed by content_hash, not finding_id. finding_id is a
+# delete+reinsert PK that ctcm/pipeline.py renumbers on every pipeline re-run
+# (by design -- see ctcm/adjudicate.py's own module docstring), so an
+# adjudications row's finding_id goes stale the moment the pipeline re-runs
+# again after it was written; a join on it is a silent no-op against any live
+# corpus that has been re-run since (confirmed against data/ctcm.db: every one
+# of its finding_id values was orphaned). content_hash is computed from the
+# finding's actual content -- (nct_id, from_version, to_version, change_type,
+# before_measure, after_measure) -- which survives renumbering. Imported from
+# ctcm.adjudicate rather than reimplemented here so there's exactly one
+# definition of the hash.
 # ---------------------------------------------------------------------------
 
+_SENTENCE_END_RE = re.compile(r"(?<=[.!?])\s+")
 
-def _adjudications_index(conn: sqlite3.Connection) -> tuple[str, dict] | None:
-    """(strategy, {key: row_dict}) if an adjudications table with a usable key
-    exists, else None. Tries a finding_id FK first, then the natural key
-    (nct_id, from_version, to_version, change_type) that content_hash-keyed rows
-    would still need to carry to be joinable back to a specific finding at all."""
+
+def _first_sentence(text: str | None) -> str | None:
+    """Judge rationale is written as 2-4 sentences (see adjudicate.py's
+    _judge_prompt); case cards need a one-line excerpt, not the full verdict."""
+    return _SENTENCE_END_RE.split(text.strip(), maxsplit=1)[0] if text else text
+
+
+def _adjudications_index(conn: sqlite3.Connection) -> dict | None:
+    """{content_hash: row_dict} if an adjudications table in ctcm.adjudicate's
+    shape exists, else None. Still checks defensively (table may not exist yet,
+    or may exist in some other shape) rather than assuming -- same philosophy
+    as the rest of this module's cache/schema reads."""
     if not _table_exists(conn, "adjudications"):
         return None
     cols = {row[1] for row in conn.execute("PRAGMA table_info(adjudications)")}
-    if "finding_id" in cols:
-        rows = conn.execute("SELECT * FROM adjudications").fetchall()
-        return "finding_id", {r["finding_id"]: dict(r) for r in rows}
-    natural_key = {"nct_id", "from_version", "to_version", "change_type"}
-    if natural_key <= cols:
-        rows = conn.execute("SELECT * FROM adjudications").fetchall()
-        return "natural", {(r["nct_id"], r["from_version"], r["to_version"], r["change_type"]): dict(r) for r in rows}
-    return None  # table exists but no key we can join on -- skip rather than guess
+    if "content_hash" not in cols:
+        return None  # table exists but not in adjudicate.py's shape -- skip rather than guess
+    rows = conn.execute("SELECT * FROM adjudications").fetchall()
+    return {r["content_hash"]: dict(r) for r in rows}
 
 
-def _adjudication_for(adj_index: tuple[str, dict] | None, finding_row: sqlite3.Row) -> dict | None:
+def _adjudication_for(adj_index: dict | None, finding_row: sqlite3.Row) -> dict | None:
     if adj_index is None:
         return None
-    strategy, lookup = adj_index
-    key = (
-        finding_row["finding_id"]
-        if strategy == "finding_id"
-        else (finding_row["nct_id"], finding_row["from_version"], finding_row["to_version"], finding_row["change_type"])
+    chash = content_hash(
+        finding_row["nct_id"], finding_row["from_version"], finding_row["to_version"],
+        finding_row["change_type"], finding_row["before_measure"], finding_row["after_measure"],
     )
-    return lookup.get(key)
+    row = adj_index.get(chash)
+    # UNREVIEWED means the LLM chain itself failed (timeout, bad JSON, ...) --
+    # its "rationale" is an internal error string, not a judged verdict, so it's
+    # not a real adjudication to surface (adjudicate.py's Adjudication dataclass
+    # documents UNREVIEWED as the on-any-failure sentinel, not a concern level).
+    if row is None or row["severity_confirmed"] == "UNREVIEWED":
+        return None
+    return {
+        "concern": row["severity_confirmed"],
+        "confidence": row["confidence"],
+        "rationale": _first_sentence(_ue(row["rationale"])),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +287,8 @@ def list_trials(
             SELECT t.nct_id, t.lead_sponsor, t.sponsor_class, t.phase, t.conditions,
                    t.overall_status, t.enrolment_count, t.version_count,
                    hf.finding_id, hf.from_version, hf.to_version, hf.severity, hf.change_type,
-                   hf.days_after_enrolment, hf.days_after_primary_completion, hf.rationale
+                   hf.days_after_enrolment, hf.days_after_primary_completion, hf.rationale,
+                   hf.before_measure, hf.after_measure
             FROM trials t
             LEFT JOIN ({HEADLINE_FINDING_SQL}) hf ON hf.nct_id = t.nct_id
             {where_sql}

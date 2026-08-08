@@ -6,6 +6,7 @@ states (absent -- the common case today -- and present with either key strategy)
 from fastapi.testclient import TestClient
 
 from ctcm import config, db
+from ctcm.adjudicate import content_hash, ensure_schema
 from ctcm.api import app
 
 client = TestClient(app)
@@ -204,38 +205,53 @@ def test_works_without_adjudications_table(tmp_path, monkeypatch):
     assert index_row["adjudication"] is None
 
 
-def test_adjudications_natural_key_join(tmp_path, monkeypatch):
-    """If adjudicate.py lands with a (nct_id, from_version, to_version, change_type)
-    natural key instead of a finding_id FK, the join still finds it."""
-    _fixture_db(tmp_path, monkeypatch)
-    conn = db.connect()
+def _seed_adjudication(conn, chash, severity_confirmed, rationale, finding_id=999999, confidence=0.8):
+    """finding_id defaults to a value that matches nothing in the fixture's findings
+    table -- the whole point of the content-hash join is that finding_id is allowed
+    to be stale/wrong, per the real ctcm/adjudicate.py schema (ADJUDICATIONS_SCHEMA)."""
+    ensure_schema(conn)
     conn.execute(
-        "CREATE TABLE adjudications(nct_id TEXT, from_version INT, to_version INT, change_type TEXT, "
-        "concern TEXT, confidence REAL, rationale TEXT)"
-    )
-    conn.execute(
-        "INSERT INTO adjudications VALUES ('NCT1', 0, 1, 'PRIMARY_REPLACED', 'moderate', 0.8, 'looks like a genuine switch')"
+        "INSERT INTO adjudications(content_hash, finding_id, nct_id, severity_confirmed, confidence, rationale, "
+        "defence, prosecution, model, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (chash, finding_id, "NCT1", severity_confirmed, confidence, rationale, "d", "p", "m", "2020-01-01"),
     )
     conn.commit()
+
+
+def test_adjudication_joins_by_content_hash_despite_stale_finding_id(tmp_path, monkeypatch):
+    """The real ctcm/adjudicate.py table is keyed by content_hash, not finding_id --
+    pipeline re-runs delete+reinsert findings, renumbering finding_id on every run
+    (by design), so a join against finding_id alone is a no-op on any corpus that's
+    been re-run since the adjudication was written (confirmed: this is exactly
+    what's wrong with the real data/ctcm.db right now). content_hash is computed
+    from the finding's own content, so a stale finding_id doesn't break the join."""
+    _fixture_db(tmp_path, monkeypatch)
+    conn = db.connect()
+    chash = content_hash("NCT1", 0, 1, "PRIMARY_REPLACED", "Original measure", "New measure")
+    _seed_adjudication(conn, chash, "HIGH", "First sentence of the verdict. Second sentence with more detail.")
     conn.close()
 
     detail = client.get("/api/trials/NCT1").json()
     adj = detail["findings"][0]["adjudication"]
     assert adj is not None
-    assert adj["concern"] == "moderate"
+    assert adj["concern"] == "HIGH"
+    assert adj["confidence"] == 0.8
+    assert adj["rationale"] == "First sentence of the verdict."  # excerpted to one sentence
 
     index_row = next(row for row in client.get("/api/trials").json()["rows"] if row["nctId"] == "NCT1")
-    assert index_row["adjudication"]["concern"] == "moderate"
+    assert index_row["adjudication"] == adj
 
 
-def test_adjudications_finding_id_join(tmp_path, monkeypatch):
-    """If adjudicate.py instead uses a finding_id FK, that strategy is tried first."""
+def test_adjudication_unreviewed_is_suppressed(tmp_path, monkeypatch):
+    """UNREVIEWED means the defence/prosecution/judge chain itself failed (LLM
+    timeout, malformed JSON, ...) -- adjudicate.py stores an internal error string
+    as the "rationale" in that case, not a judged concern level. That's not fit to
+    show as if it were a real verdict, so it's treated the same as no adjudication."""
     _fixture_db(tmp_path, monkeypatch)
     conn = db.connect()
-    conn.execute("CREATE TABLE adjudications(finding_id INTEGER, concern TEXT)")
-    conn.execute("INSERT INTO adjudications VALUES (1, 'low')")
-    conn.commit()
+    chash = content_hash("NCT1", 0, 1, "PRIMARY_REPLACED", "Original measure", "New measure")
+    _seed_adjudication(conn, chash, "UNREVIEWED", "adjudication failed: judge call failed: timed out", confidence=0.0)
     conn.close()
 
     detail = client.get("/api/trials/NCT1").json()
-    assert detail["findings"][0]["adjudication"]["concern"] == "low"
+    assert detail["findings"][0]["adjudication"] is None
