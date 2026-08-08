@@ -157,6 +157,50 @@ def test_assemble_evidence_includes_sponsor_dates_and_outcomes(conn):
     assert "PRIMARY_DEMOTED" in evidence
 
 
+def test_assemble_evidence_includes_timeline_anchors_block(conn):
+    finding = _seed_actt1_like(conn)
+    evidence = assemble_evidence(finding, conn)
+    assert "TIMELINE ANCHORS" in evidence
+    assert "2020-02-21" in evidence  # start anchor
+    assert "2020-06-18" in evidence  # pcd anchor (only value seeded so far)
+
+
+def test_assemble_evidence_anchors_use_corrected_actual_not_stale_estimate(conn):
+    # Regression for the reviewer-verified NCT04280705 bug: a finding's own
+    # [from_version, to_version] window (9->14 here) only ever saw the stale
+    # ESTIMATED pcd (2020-06-18, seeded by _seed_actt1_like at v9/v14); the real
+    # correction lands later, at v20, as ACTUAL. anchors() must still find it
+    # by scanning every fetched version, not just this finding's own pair.
+    finding = _seed_actt1_like(conn)
+    conn.execute(
+        "INSERT INTO timeline_facts(nct_id, version_no, start_date, start_date_type, primary_completion_date, primary_completion_type) "
+        "VALUES ('NCT1', 20, '2020-02-21', 'ACTUAL', '2020-05-21', 'ACTUAL')"
+    )
+    conn.commit()
+    evidence = assemble_evidence(finding, conn)
+    assert "2020-05-21" in evidence
+    assert "ACTUAL" in evidence
+
+
+def test_assemble_evidence_defuses_banned_word_in_before_after_measure(conn):
+    finding = _seed_actt1_like(conn)
+    conn.execute("UPDATE findings SET before_measure=? WHERE finding_id=1", ("Possible fraud indicator scale",))
+    conn.commit()
+    finding = conn.execute("SELECT * FROM findings WHERE finding_id=1").fetchone()
+    evidence = assemble_evidence(finding, conn)
+    assert "fraud" not in evidence.lower()
+    assert "concerning" in evidence.lower()
+
+
+def test_assemble_evidence_defuses_banned_word_in_outcome_measure(conn):
+    finding = _seed_actt1_like(conn)
+    conn.execute("UPDATE outcomes SET measure=? WHERE nct_id='NCT1' AND version_no=9", ("Scale documenting misconduct reports",))
+    conn.commit()
+    evidence = assemble_evidence(finding, conn)
+    assert "misconduct" not in evidence.lower()
+    assert "concerning" in evidence.lower()
+
+
 def test_assemble_evidence_handles_missing_trial_row(conn):
     conn.execute(
         "INSERT INTO findings(finding_id, nct_id, from_version, to_version, change_type, severity, "
@@ -246,6 +290,22 @@ def test_adjudicate_unrecognised_concern_value_yields_unreviewed(conn):
     adj = adjudicate(finding, conn, llm=fake)
 
     assert adj.severity_confirmed == "UNREVIEWED"
+
+
+def test_adjudicate_clamps_confidence_above_one(conn):
+    finding = _seed_actt1_like(conn)
+    judge = json.dumps({"concern": "high", "confidence": 1.4, "rationale": "x"})
+    fake = FakeLLM(["defence", "prosecution", judge])
+    adj = adjudicate(finding, conn, llm=fake)
+    assert adj.confidence == 1.0
+
+
+def test_adjudicate_clamps_confidence_below_zero(conn):
+    finding = _seed_actt1_like(conn)
+    judge = json.dumps({"concern": "low", "confidence": -0.3, "rationale": "x"})
+    fake = FakeLLM(["defence", "prosecution", judge])
+    adj = adjudicate(finding, conn, llm=fake)
+    assert adj.confidence == 0.0
 
 
 def test_adjudicate_filters_banned_word_from_persisted_rationale(conn):

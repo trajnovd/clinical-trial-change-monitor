@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from ctcm import config
+from ctcm.timeline import anchors as compute_anchors
 
 CLAUDE_MODEL = "claude-haiku-4-5-20251001"
 LLM_TIMEOUT_S = 90
@@ -68,6 +69,13 @@ def ensure_schema(conn) -> None:
 # ---- evidence assembly -------------------------------------------------------------
 
 
+def _safe(text: str | None) -> str | None:
+    """Registry-sourced free text (outcome measures, before/after measure) isn't
+    guaranteed clean like our own fixed prompt templates -- defuse it before it
+    reaches a prompt, not just the model's response coming back out."""
+    return _defuse(text)[0] if text else text
+
+
 def _outcomes_block(conn, nct: str, version_no: int) -> str:
     rows = conn.execute(
         "SELECT outcome_type, measure, time_frame FROM outcomes WHERE nct_id=? AND version_no=? ORDER BY outcome_type, ordinal",
@@ -76,7 +84,7 @@ def _outcomes_block(conn, nct: str, version_no: int) -> str:
     if not rows:
         return "  (no outcomes recorded)"
     return "\n".join(
-        f"  - [{r['outcome_type']}] {r['measure']}" + (f" (time frame: {r['time_frame']})" if r["time_frame"] else "")
+        f"  - [{r['outcome_type']}] {_safe(r['measure'])}" + (f" (time frame: {_safe(r['time_frame'])})" if r["time_frame"] else "")
         for r in rows
     )
 
@@ -92,11 +100,26 @@ def _timeline_block(conn, nct: str, version_no: int) -> str:
     )
 
 
+def _anchors_block(anc) -> str:
+    return (
+        f"  enrolment start: {anc.start} ({anc.start_type or 'unknown'})\n"
+        f"  primary completion: {anc.pcd} ({anc.pcd_type or 'unknown'})"
+    )
+
+
 def assemble_evidence(finding_row, conn) -> str:
-    """Evidence package for one finding: both versions' outcomes, both versions'
-    timeline facts, sponsor/phase, and the finding row itself. Same text goes into
-    all three prompts (defence/prosecution/judge) so every party argues from the
-    same facts."""
+    """Evidence package for one finding: the resolved timeline anchors, both
+    versions' outcomes, both versions' timeline facts, sponsor/phase, and the
+    finding row itself. Same text goes into all three prompts (defence/
+    prosecution/judge) so every party argues from the same facts.
+
+    The TIMELINE ANCHORS block is the earliest-recorded/ACTUAL-preferred dates
+    from ctcm.timeline.anchors() -- the same anchors classify.py used to compute
+    days_after_enrolment/days_after_primary_completion below. Without it, a
+    finding whose [from_version, to_version] window predates a later
+    ESTIMATED->ACTUAL correction (e.g. NCT04280705 v0->v9, corrected only at
+    v20) would only ever show the model the superseded per-version estimate in
+    the Timeline-as-of blocks, with nothing to reconcile the day-count against."""
     nct = finding_row["nct_id"]
     vfrom, vto = finding_row["from_version"], finding_row["to_version"]
     trial = conn.execute("SELECT lead_sponsor, sponsor_class, phase, overall_status FROM trials WHERE nct_id=?", (nct,)).fetchone()
@@ -105,16 +128,20 @@ def assemble_evidence(finding_row, conn) -> str:
         if trial
         else "Sponsor/phase: unknown (no trial row)"
     )
+    anc = compute_anchors(nct, conn)
 
     return (
         f"Trial: {nct}\n"
         f"{sponsor_line}\n\n"
         f"Finding: {finding_row['change_type']} (v{vfrom} -> v{vto})\n"
-        f"Before measure: {finding_row['before_measure'] or '(none)'}\n"
-        f"After measure: {finding_row['after_measure'] or '(none)'}\n"
+        f"Before measure: {_safe(finding_row['before_measure']) or '(none)'}\n"
+        f"After measure: {_safe(finding_row['after_measure']) or '(none)'}\n"
         f"Days after enrolment: {finding_row['days_after_enrolment']}\n"
         f"Days after primary completion: {finding_row['days_after_primary_completion']}\n"
         f"Detector rationale: {finding_row['rationale']}\n\n"
+        f"TIMELINE ANCHORS (earliest recorded across every fetched version, ACTUAL preferred over ESTIMATED -- "
+        f"this is what the two day-counts above are computed from; per-version snapshots below may show an "
+        f"earlier, superseded estimate):\n{_anchors_block(anc)}\n\n"
         f"Outcomes as of v{vfrom}:\n{_outcomes_block(conn, nct, vfrom)}\n\n"
         f"Outcomes as of v{vto}:\n{_outcomes_block(conn, nct, vto)}\n\n"
         f"Timeline as of v{vfrom}:\n{_timeline_block(conn, nct, vfrom)}\n"
@@ -156,7 +183,9 @@ def _judge_prompt(evidence: str, defence_text: str, prosecution_text: str) -> st
     return (
         "You are an impartial judge weighing a defence and a prosecution argument about a change to a clinical "
         "trial's registered outcome measures. Decide how concerning the change is, using only the evidence and "
-        "the two arguments below.\n\n"
+        "the two arguments below. When your rationale cites a start or primary completion date, cite the "
+        "TIMELINE ANCHORS values from the evidence, not a per-version Timeline-as-of snapshot -- a snapshot may "
+        "show a superseded estimate that was later corrected.\n\n"
         f"EVIDENCE:\n{evidence}\n\nDEFENCE ARGUMENT:\n{defence_text}\n\nPROSECUTION ARGUMENT:\n{prosecution_text}\n\n"
         "Respond with strict JSON only, no other text, matching exactly this shape:\n"
         '{"concern": "low"|"moderate"|"high", "confidence": <number 0-1>, "rationale": "2-4 sentences citing the actual dates"}'
@@ -290,7 +319,7 @@ def adjudicate(finding_row, conn, llm=None) -> Adjudication:
         concern = str(verdict["concern"]).strip().upper()
         if concern not in _CONCERN_LEVELS:
             raise ValueError(f"judge returned unrecognised concern: {verdict.get('concern')!r}")
-        confidence = float(verdict["confidence"])
+        confidence = max(0.0, min(1.0, float(verdict["confidence"])))  # judge is asked for 0-1 but not enforced to comply
         rationale, _ = _defuse(str(verdict["rationale"]))
 
         adj = Adjudication(concern, confidence, rationale, defence, prosecution)
