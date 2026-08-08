@@ -1,0 +1,346 @@
+{
+  "studyVersion": 0,
+  "study": {
+    "protocolSection": {
+      "identificationModule": {
+        "nctId": "NCT04280705",
+        "orgStudyIdInfo": {
+          "id": "20-0006"
+        },
+        "organization": {
+          "fullName": "National Institute of Allergy and Infectious Diseases (NIAID)",
+          "class": "NIH"
+        },
+        "briefTitle": "Adaptive COVID-19 Treatment Trial",
+        "officialTitle": "A Multicenter, Adaptive, Randomized Blinded Controlled Trial of the Safety and Efficacy of Investigational Therapeutics for the Treatment of COVID-19 in Hospitalized Adults"
+      },
+      "statusModule": {
+        "statusVerifiedDate": "2020-02",
+        "overallStatus": "NOT_YET_RECRUITING",
+        "expandedAccessInfo": {
+          "hasExpandedAccess": false
+        },
+        "startDateStruct": {
+          "date": "2020-03-12",
+          "type": "ESTIMATED"
+        },
+        "primaryCompletionDateStruct": {
+          "date": "2023-04-01",
+          "type": "ESTIMATED"
+        },
+        "completionDateStruct": {
+          "date": "2023-04-01",
+          "type": "ESTIMATED"
+        },
+        "studyFirstSubmitDate": "2020-02-20",
+        "studyFirstSubmitQcDate": "2020-02-20",
+        "studyFirstPostDateStruct": {
+          "date": "2020-02-21",
+          "type": "ACTUAL"
+        },
+        "lastUpdateSubmitDate": "2020-02-20",
+        "lastUpdatePostDateStruct": {
+          "date": "2020-02-21",
+          "type": "ACTUAL"
+        }
+      },
+      "sponsorCollaboratorsModule": {
+        "responsibleParty": {
+          "type": "SPONSOR"
+        },
+        "leadSponsor": {
+          "name": "National Institute of Allergy and Infectious Diseases (NIAID)",
+          "class": "NIH"
+        }
+      },
+      "oversightModule": {
+        "isFdaRegulatedDrug": true,
+        "isFdaRegulatedDevice": false,
+        "isUsExport": false
+      },
+      "descriptionModule": {
+        "briefSummary": "This study is an adaptive, randomized, double-blind, placebo-controlled trial to evaluate the safety and efficacy of novel therapeutic agents in hospitalized adult patients diagnosed with COVID-19.\nThe study is a multicenter trial that will be conducted in up to 50 sites globally.\nThe study will be a series of 2-arm comparisons between different investigational therapeutic agents and a placebo.\nThere will be interim monitoring to introduce new arms and allow early stopping for futility, efficacy, or safety.\nIf one therapy proves to be efficacious, this treatment will then become the control arm for comparison(s) with new experimental treatment(s).\nBecause of the possibility that background standards of supportive care may evolve&#x2F;improve over time as more is learned about successful management of COVID-19, comparisons of safety and efficacy will be based on data from concurrently randomized participants.\nAn independent data and safety monitoring board (DSMB) will actively monitor interim data to make recommendations about early study closure or changes to study arms.\nRandomization will be stratified by: 1) site and 2) severity of illness at enrollment, severe disease (requiring mechanical ventilation or oxygen, a SpO2 &lt;&#x2F;= 94% or tachypnea (respiratory rate &gt;&#x2F;= 24 breaths&#x2F;min)) or mild-moderate disease (SpO2 &gt; 94% and respiratory rate &lt; 24 breaths&#x2F;min without supplemental oxygen)).\nSubjects will be assessed daily while hospitalized.\nDischarged patients will be asked to attend study visits at Days 15, and 29.\nAll subjects will undergo a series of efficacy, safety, and laboratory assessments.\nThe primary objective of the study is to evaluate the clinical efficacy of different investigational therapeutics relative to the control arm in patients hospitalized with COVID-19.",
+        "detailedDescription": "This study is an adaptive, randomized, double-blind, placebo-controlled trial to evaluate the safety and efficacy of novel therapeutic agents in hospitalized adult patients diagnosed with COVID-19.\nThe study is a multicenter trial that will be conducted in up to 50 sites globally.\nThe study will be a series of 2-arm comparisons between different investigational therapeutic agents and a placebo.\nThere will be interim monitoring to introduce new arms and allow early stopping for futility, efficacy, or safety.\nIf one therapy proves to be efficacious, this treatment will then become the control arm for comparison(s) with new experimental treatment(s).\nBecause of the possibility that background standards of supportive care may evolve&#x2F;improve over time as more is learned about successful management of COVID-19, comparisons of safety and efficacy will be based on data from concurrently randomized participants.\nAn independent data and safety monitoring board (DSMB) will actively monitor interim data to make recommendations about early study closure or changes to study arms.\nRandomization will be stratified by: 1) site and 2) severity of illness at enrollment, severe disease (requiring mechanical ventilation or oxygen, a SpO2 &lt;&#x2F;= 94% or tachypnea (respiratory rate &gt;&#x2F;= 24 breaths&#x2F;min)) or mild-moderate disease (SpO2 &gt; 94% and respiratory rate &lt; 24 breaths&#x2F;min without supplemental oxygen)).\nSubjects will be assessed daily while hospitalized.\nDischarged patients will be asked to attend study visits at Days 15, and 29.\nAll subjects will undergo a series of efficacy, safety, and laboratory assessments.\nThe primary objective of the study is to evaluate the clinical efficacy of different investigational therapeutics relative to the control arm in patients hospitalized with COVID-19.\nThe secondary objectives of the study are to 1) evaluate the clinical efficacy of different investigational therapeutics as compared to the control arm as assessed by clinical severity, hospitalization, and mortality, and 2) evaluate the safety of the intervention through 28 days of follow-up as compared to the control arm."
+      },
+      "conditionsModule": {
+        "conditions": [
+          "Corona Virus Infection"
+        ],
+        "keywords": [
+          "Adaptive",
+          "COVID-19",
+          "Efficacy",
+          "Multicenter",
+          "novel coronavirus",
+          "Safety"
+        ]
+      },
+      "designModule": {
+        "studyType": "INTERVENTIONAL",
+        "phases": [
+          "PHASE2"
+        ],
+        "designInfo": {
+          "allocation": "RANDOMIZED",
+          "interventionModel": "PARALLEL",
+          "primaryPurpose": "TREATMENT",
+          "maskingInfo": {
+            "masking": "DOUBLE",
+            "whoMasked": [
+              "PARTICIPANT",
+              "INVESTIGATOR"
+            ]
+          }
+        },
+        "enrollmentInfo": {
+          "count": 394,
+          "type": "ESTIMATED"
+        }
+      },
+      "armsInterventionsModule": {
+        "armGroups": [
+          {
+            "label": "Placebo",
+            "type": "OTHER",
+            "description": "200 mg of Remdesivir placebo administered intravenously on Day 1, followed by a 100 mg once-daily maintenance dose of Remdesivir placebo for the duration of the hospitalization up to a 10 days total course.\nn=197.",
+            "interventionNames": [
+              "Other: Placebo"
+            ]
+          },
+          {
+            "label": "Remdesivir",
+            "type": "EXPERIMENTAL",
+            "description": "200 mg of Remdesivir administered intravenously on Day 1, followed by a 100 mg once-daily maintenance dose of Remdesivir for the duration of the hospitalization up to a 10 days total course.\nn=197.",
+            "interventionNames": [
+              "Drug: Remdesivir"
+            ]
+          }
+        ],
+        "interventions": [
+          {
+            "type": "OTHER",
+            "name": "Placebo",
+            "description": "The supplied matching placebo lyophilized formulation is identical in physical appearance to the active lyophilized formulation and contains the same inactive ingredients.",
+            "armGroupLabels": [
+              "Placebo"
+            ]
+          },
+          {
+            "type": "DRUG",
+            "name": "Remdesivir",
+            "description": "Drug Remdesivir is a single diastereomer monophosphoramidate prodrug designed for the intracellular delivery of a modified adenine nucleoside analog GS-441524.\nIn addition to the active ingredient, the lyophilized formulation of Remdesivir contains the following inactive ingredients: water for injection, sulfobutylether beta-cyclodextrin sodium (SBECD), and hydrochloric acid and&#x2F;or sodium hydroxide.",
+            "armGroupLabels": [
+              "Remdesivir"
+            ]
+          }
+        ]
+      },
+      "outcomesModule": {
+        "primaryOutcomes": [
+          {
+            "measure": "Percentage of subjects reporting each severity rating on the 7-point ordinal scale",
+            "description": "The ordinal scale is an assessment of the clinical status at the first assessment of a given study day.\nThe scale is as follows: 1) Death; 2) Hospitalized, on invasive mechanical ventilation or extracorporeal membrane oxygenation (ECMO); 3) Hospitalized, on non-invasive ventilation or high flow oxygen devices; 4) Hospitalized, requiring supplemental oxygen; 5) Hospitalized, not requiring supplemental oxygen; 6) Not hospitalized, limitation on activities; 7) Not hospitalized, no limitations on activities.",
+            "timeFrame": "Day 15"
+          }
+        ],
+        "secondaryOutcomes": [
+          {
+            "measure": "Change from baseline in alanine transaminase (ALT)",
+            "timeFrame": "Day 1 through Day 29"
+          },
+          {
+            "measure": "Change from baseline in aspartate transaminase (AST)",
+            "timeFrame": "Day 1 through Day 29"
+          },
+          {
+            "measure": "Change from baseline in creatinine",
+            "timeFrame": "Day 1 through Day 29"
+          },
+          {
+            "measure": "Change from baseline in glucose",
+            "timeFrame": "Day 1 through Day 29"
+          },
+          {
+            "measure": "Change from baseline in hemoglobin",
+            "timeFrame": "Day 1 through Day 29"
+          },
+          {
+            "measure": "Change from baseline in platelets",
+            "timeFrame": "Day 1 through Day 29"
+          },
+          {
+            "measure": "Change from baseline in total bilirubin",
+            "timeFrame": "Day 1 through Day 29"
+          },
+          {
+            "measure": "Change from baseline in white blood cell count",
+            "timeFrame": "Day 1 through Day 29"
+          },
+          {
+            "measure": "Change in National Early Warning Score (NEWS) from baseline",
+            "description": "The NEW score has demonstrated an ability to discriminate patients at risk of poor outcomes.\nThis score is based on 7 clinical parameters (respiration rate, oxygen saturation, any supplemental oxygen, temperature, systolic blood pressure, heart rate, level of consciousness).\nThe NEW Score is being used as an efficacy measure.",
+            "timeFrame": "Day 3 through Day 29"
+          },
+          {
+            "measure": "Cumulative incidence of serious adverse events (SAEs)",
+            "description": "An SAE is defined as an AE or suspected adverse reaction is considered serious if, in the view of either the investigator or the sponsor, it results in death, a life-threatening AE, inpatient hospitalization or prolongation of existing hospitalization, a persistent or significant incapacity or substantial disruption of the ability to conduct normal life functions, or a congenital anomaly&#x2F;birth defect.",
+            "timeFrame": "Day 1 through Day 29"
+          },
+          {
+            "measure": "Cumulative incidence of severe adverse events (AEs)",
+            "description": "Severe AEs include Grade 3 and 4 AEs.\nGrade 3 AEs are defined as events that interrupt usual activities of daily living, or significantly affects clinical status, or may require intensive therapeutic intervention.\nSevere events are usually incapacitating.\nGrade 4 AEs are defined as events that are potentially life threatening.",
+            "timeFrame": "Day 1 through Day 29"
+          },
+          {
+            "measure": "Discontinuation temporary suspension of infusions",
+            "description": "For any reason.",
+            "timeFrame": "Day 1 through Day 29"
+          },
+          {
+            "measure": "Duration of hospitalization",
+            "description": "Measured in days.",
+            "timeFrame": "Day 1 through Day 29"
+          },
+          {
+            "measure": "Duration of new mechanical ventilation",
+            "timeFrame": "Day 1 through Day 29"
+          },
+          {
+            "measure": "Duration of new oxygen use",
+            "timeFrame": "Day 1 through Day 29"
+          },
+          {
+            "measure": "Incidence of new mechanical ventilation",
+            "timeFrame": "Day 1 through Day 29"
+          },
+          {
+            "measure": "Incidence of new oxygen use",
+            "timeFrame": "Day 1 through Day 29"
+          },
+          {
+            "measure": "Mean change in the ordinal scale from baseline",
+            "description": "The ordinal scale is an assessment of the clinical status at the first assessment of a given study day.\nThe scale is as follows: 1) Death; 2) Hospitalized, on invasive mechanical ventilation or extracorporeal membrane oxygenation (ECMO); 3) Hospitalized, on non-invasive ventilation or high flow oxygen devices; 4) Hospitalized, requiring supplemental oxygen; 5) Hospitalized, not requiring supplemental oxygen; 6) Not hospitalized, limitation on activities; 7) Not hospitalized, no limitations on activities.",
+            "timeFrame": "Day 3 through Day 29"
+          },
+          {
+            "measure": "Number of oxygenation free days",
+            "timeFrame": "Day 1 to Day 29"
+          },
+          {
+            "measure": "Number of ventilator free days",
+            "timeFrame": "Day 1 to Day 29"
+          },
+          {
+            "measure": "Subject clinical status using ordinal scale",
+            "description": "The ordinal scale is an assessment of the clinical status at the first assessment of a given study day.\nThe scale is as follows: 1) Death; 2) Hospitalized, on invasive mechanical ventilation or extracorporeal membrane oxygenation (ECMO); 3) Hospitalized, on non-invasive ventilation or high flow oxygen devices; 4) Hospitalized, requiring supplemental oxygen; 5) Hospitalized, not requiring supplemental oxygen; 6) Not hospitalized, limitation on activities; 7) Not hospitalized, no limitations on activities.",
+            "timeFrame": "Day 3 through Day 29"
+          },
+          {
+            "measure": "Subject mortality",
+            "description": "Date and cause of death (if applicable).",
+            "timeFrame": "Day 1 through Day 29"
+          },
+          {
+            "measure": "Time to an improvement of one category from admission using an ordinal scale",
+            "description": "The ordinal scale is an assessment of the clinical status at the first assessment of a given study day.\nThe scale is as follows: 1) Death; 2) Hospitalized, on invasive mechanical ventilation or extracorporeal membrane oxygenation (ECMO); 3) Hospitalized, on non-invasive ventilation or high flow oxygen devices; 4) Hospitalized, requiring supplemental oxygen; 5) Hospitalized, not requiring supplemental oxygen; 6) Not hospitalized, limitation on activities; 7) Not hospitalized, no limitations on activities.",
+            "timeFrame": "Day 1 through Day 29"
+          },
+          {
+            "measure": "Time to discharge or to a National Early Warning Score (NEWS) of &lt;&#x2F;= 2 and maintained for 24 hours, whichever occurs first",
+            "description": "The NEW score has demonstrated an ability to discriminate patients at risk of poor outcomes.\nThis score is based on 7 clinical parameters (respiration rate, oxygen saturation, any supplemental oxygen, temperature, systolic blood pressure, heart rate, level of consciousness).\nThe NEW Score is being used as an efficacy measure.",
+            "timeFrame": "Day 1 through Day 29"
+          }
+        ]
+      },
+      "eligibilityModule": {
+        "eligibilityCriteria": "<p>Inclusion Criteria:</p><ol><li>Subject (or legally authorized representative) provides written informed consent prior to initiation of any study procedures.</li><li>Understands and agrees to comply with planned study procedures.</li><li>Agrees to the collection of oropharyngeal (OP) swabs and venous blood per protocol.</li><li>Male or non-pregnant female adult &gt;&#x2F;=18 years of age at time of enrollment.</li><li>Has laboratory-confirmed novel coronavirus (SARS-CoV-2) infection as determined by polymerase chain reaction (PCR), or other commercial or public health assay in any specimen &lt; 72 hours prior to randomization.</li><li><p>Illness of any duration, and at least one of the following:</p><ul><li>Radiographic infiltrates by imaging (chest x-ray, CT scan, etc.), OR</li><li>Clinical assessment (evidence of rales&#x2F;crackles on exam) AND SpO2 &lt;&#x2F;= 94% on room air, OR</li><li>Requiring mechanical ventilation and&#x2F;or supplemental oxygen.</li></ul></li><li>Women of childbearing potential must agree to use at least one primary form of contraception for the duration of the study (acceptable methods will be determined by the site).</li></ol><p>Exclusion Criteria:</p><ol><li>Alanine transaminase&#x2F;aspartate transaminase (ALT&#x2F;AST) &gt; 5 times the upper limit of normal.</li><li>Stage 4 severe chronic kidney disease or requiring dialysis (i.e.\nestimated glomerular filtration rate (eGFR) &lt; 30)</li><li>Pregnancy or breast feeding.</li><li>Anticipated transfer to another hospital which is not a study site within 72 hours.</li><li>Allergy to any study medication.</li></ol>",
+        "healthyVolunteers": false,
+        "sex": "ALL",
+        "minimumAge": "18 Years",
+        "maximumAge": "99 Years",
+        "stdAges": [
+          "ADULT",
+          "OLDER_ADULT"
+        ]
+      },
+      "contactsLocationsModule": {
+        "centralContacts": [
+          {
+            "name": "Andre Kalil",
+            "role": "CONTACT",
+            "phone": "14025598650",
+            "email": "akalil@unmc.edu"
+          }
+        ],
+        "locations": [
+          {
+            "facility": "University of Nebraska Medical Center - Infectious Diseases",
+            "city": "Omaha",
+            "state": "Nebraska",
+            "zip": "68198-5400",
+            "country": "United States",
+            "geoPoint": {
+              "lat": 41.25626,
+              "lon": -95.94043
+            }
+          }
+        ]
+      },
+      "referencesModule": {
+        "references": [
+          {
+            "pmid": "38657001",
+            "type": "DERIVED",
+            "citation": "Singh K, Rubenstein K, Callier V, Shaw-Saliba K, Rupert A, Dewar R, Laverdure S, Highbarger H, Lallemand P, Huang ML, Jerome KR, Sampoleo R, Mills MG, Greninger AL, Juneja K, Porter D, Benson CA, Dempsey W, El Sahly HM, Focht C, Jilg N, Paules CI, Rapaka RR, Uyeki TM, Clifford Lane H, Beigel J, Dodd LE; Adaptive COVID-19 Treatment Trial (ACTT-1) Study Group Members. SARS-CoV-2 RNA and Nucleocapsid Antigen Are Blood Biomarkers Associated With Severe Disease Outcomes That Improve in Response to Remdesivir. J Infect Dis. 2024 Sep 23;230(3):624-634. doi: 10.1093&#x2F;infdis&#x2F;jiae198."
+          },
+          {
+            "pmid": "38618926",
+            "type": "DERIVED",
+            "citation": "Lin DY, Wang J, Gu Y, Zeng D. Evaluating treatment efficacy in hospitalized COVID-19 patients, with applications to Adaptive COVID-19 Treatment Trials. Clin Trials. 2024 Aug;21(4):500-506. doi: 10.1177&#x2F;17407745241238443. Epub 2024 Apr 15."
+          },
+          {
+            "pmid": "37466213",
+            "type": "DERIVED",
+            "citation": "Hedskog C, Rodriguez L, Roychoudhury P, Huang ML, Jerome KR, Hao L, Ireton RC, Li J, Perry JK, Han D, Camus G, Greninger AL, Gale M Jr, Porter DP. Viral Resistance Analyses From the Remdesivir Phase 3 Adaptive COVID-19 Treatment Trial-1 (ACTT-1). J Infect Dis. 2023 Nov 2;228(9):1263-1273. doi: 10.1093&#x2F;infdis&#x2F;jiad270."
+          },
+          {
+            "pmid": "36695483",
+            "type": "DERIVED",
+            "citation": "Grundeis F, Ansems K, Dahms K, Thieme V, Metzendorf MI, Skoetz N, Benstoem C, Mikolajewska A, Griesel M, Fichtner F, Stegemann M. Remdesivir for the treatment of COVID-19. Cochrane Database Syst Rev. 2023 Jan 25;1(1):CD014962. doi: 10.1002&#x2F;14651858.CD014962.pub2."
+          },
+          {
+            "pmid": "36442063",
+            "type": "DERIVED",
+            "citation": "Potter GE, Bonnett T, Rubenstein K, Lindholm DA, Rapaka RR, Doernberg SB, Lye DC, Mularski RA, Hynes NA, Kline S, Paules CI, Wolfe CR, Frank MG, Rouphael NG, Deye GA, Sweeney DA, Colombo RE, Davey RT Jr, Mehta AK, Whitaker JA, Castro JG, Amin AN, Colombo CJ, Levine CB, Jain MK, Maves RC, Marconi VC, Grossberg R, Hozayen S, Burgess TH, Atmar RL, Ganesan A, Gomez CA, Benson CA, Lopez de Castilla D, Ahuja N, George SL, Nayak SU, Cohen SH, Lalani T, Short WR, Erdmann N, Tomashek KM, Tebas P. Temporal Improvements in COVID-19 Outcomes for Hospitalized Adults: A Post Hoc Observational Study of Remdesivir Group Participants in the Adaptive COVID-19 Treatment Trial. Ann Intern Med. 2022 Dec;175(12):1716-1727. doi: 10.7326&#x2F;M22-2116. Epub 2022 Nov 29."
+          },
+          {
+            "pmid": "34473343",
+            "type": "DERIVED",
+            "citation": "Kreuzberger N, Hirsch C, Chai KL, Tomlinson E, Khosravi Z, Popp M, Neidhardt M, Piechotta V, Salomon S, Valk SJ, Monsef I, Schmaderer C, Wood EM, So-Osman C, Roberts DJ, McQuilten Z, Estcourt LJ, Skoetz N. SARS-CoV-2-neutralising monoclonal antibodies for treatment of COVID-19. Cochrane Database Syst Rev. 2021 Sep 2;9(9):CD013825. doi: 10.1002&#x2F;14651858.CD013825.pub2."
+          },
+          {
+            "pmid": "34350582",
+            "type": "DERIVED",
+            "citation": "Ansems K, Grundeis F, Dahms K, Mikolajewska A, Thieme V, Piechotta V, Metzendorf MI, Stegemann M, Benstoem C, Fichtner F. Remdesivir for the treatment of COVID-19. Cochrane Database Syst Rev. 2021 Aug 5;8(8):CD014962. doi: 10.1002&#x2F;14651858.CD014962."
+          },
+          {
+            "pmid": "33240091",
+            "type": "DERIVED",
+            "citation": "Sultana J, Crisafulli S, Gabbay F, Lynn E, Shakir S, Trifiro G. Challenges for Drug Repurposing in the COVID-19 Pandemic Era. Front Pharmacol. 2020 Nov 6;11:588654. doi: 10.3389&#x2F;fphar.2020.588654. eCollection 2020."
+          },
+          {
+            "pmid": "32969710",
+            "type": "DERIVED",
+            "citation": "Maleszewski JJ, Young PM, Ackerman MJ, Halushka MK. Urgent Need for Studies of the Late Effects of SARS-CoV-2 on the Cardiovascular System. Circulation. 2021 Mar 30;143(13):1271-1273. doi: 10.1161&#x2F;CIRCULATIONAHA.120.051362. Epub 2020 Sep 24. No abstract available."
+          },
+          {
+            "pmid": "32445440",
+            "type": "DERIVED",
+            "citation": "Beigel JH, Tomashek KM, Dodd LE, Mehta AK, Zingman BS, Kalil AC, Hohmann E, Chu HY, Luetkemeyer A, Kline S, Lopez de Castilla D, Finberg RW, Dierberg K, Tapson V, Hsieh L, Patterson TF, Paredes R, Sweeney DA, Short WR, Touloumi G, Lye DC, Ohmagari N, Oh MD, Ruiz-Palacios GM, Benfield T, Fatkenheuer G, Kortepeter MG, Atmar RL, Creech CB, Lundgren J, Babiker AG, Pett S, Neaton JD, Burgess TH, Bonnett T, Green M, Makowski M, Osinusi A, Nayak S, Lane HC; ACTT-1 Study Group Members. Remdesivir for the Treatment of Covid-19 - Final Report. N Engl J Med. 2020 Nov 5;383(19):1813-1826. doi: 10.1056&#x2F;NEJMoa2007764. Epub 2020 Oct 8."
+          }
+        ]
+      }
+    },
+    "hasResults": false
+  }
+}
