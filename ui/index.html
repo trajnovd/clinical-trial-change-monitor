@@ -14,10 +14,10 @@
     Motion    One moment only — word-diff marks (<ins>/<del>) fade in when the selection
               changes; respects prefers-reduced-motion.
 
-  Data-access seam: the ENTIRE app reads trial data through one function, getTrial(nctId).
-  It resolves hardcoded JSON today; swap its body for
-    const res = await fetch('/api/trials/' + nctId); return res.json();
-  and nothing else in this file has to change.
+  Data-access seam: the ENTIRE app reads trial data through getTrial(nctId) and
+  fetchIndex(params) below. Both call the v0.6 API (ctcm/api.py) first; if the fetch
+  fails (e.g. this file opened directly as file://, no server), they fall back to the
+  embedded TRIAL_DATA constant so the file still demos standalone.
 -->
 <html lang="en">
 <head>
@@ -158,6 +158,53 @@
     color: #fff;
   }
 
+  .search-group { flex: 1 1 16rem; display: flex; align-items: center; gap: .4rem; margin-left: auto; }
+  .search-input {
+    flex: 1;
+    max-width: 20rem;
+    font: inherit;
+    font-family: var(--mono);
+    font-size: .85rem;
+    padding: .4rem .7rem;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--paper-raised);
+    color: var(--ink);
+  }
+  .search-input::placeholder { color: var(--ink-muted); }
+  .search-input:focus-visible { outline: 3px solid var(--focus); outline-offset: 1px; }
+
+  .status-note { font-size: .85rem; color: var(--ink-muted); padding: 1.5rem 0; }
+
+  /* ---------- case studies strip ---------- */
+  .case-studies { margin-bottom: 2rem; }
+  .case-studies-heading {
+    font-family: var(--mono);
+    font-size: .72rem;
+    text-transform: uppercase;
+    letter-spacing: .1em;
+    color: var(--ink-muted);
+    margin-bottom: .7rem;
+  }
+  .case-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+    gap: .9rem;
+  }
+  .case-card {
+    background: var(--paper-raised);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--flag);
+    border-radius: var(--radius);
+    padding: .9rem 1.05rem;
+    text-decoration: none;
+    color: inherit;
+    display: block;
+  }
+  .case-card:hover { border-left-color: var(--accent); background: var(--accent-soft); }
+  .case-card-id { font-family: var(--mono); font-weight: 700; font-size: .82rem; }
+  .case-card-story { font-size: .85rem; margin-top: .35rem; color: var(--ink); }
+
   .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--paper-raised); }
   table.ledger { width: 100%; border-collapse: collapse; font-size: .92rem; min-width: 46rem; }
   table.ledger th, table.ledger td { padding: .7rem .9rem; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
@@ -261,6 +308,7 @@
     gap: .4rem;
   }
   .v-node {
+    position: relative;
     width: 15px; height: 15px;
     border-radius: 50%;
     border: 2px solid var(--ink);
@@ -270,6 +318,15 @@
   }
   .v-node[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); }
   .v-node:hover { border-color: var(--accent); }
+  .v-node.has-signal { border-color: var(--flag); }
+  .v-node.has-signal::after {
+    content: "";
+    position: absolute;
+    top: -5px; right: -5px;
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--flag);
+  }
   .v-label {
     position: absolute;
     top: 20px;
@@ -419,8 +476,8 @@
     "enrolmentStart": "2020-02-21",
     "primaryCompletion": "2020-05-21",
     "historyUrl": "https://clinicaltrials.gov/study/NCT04280705?tab=history",
-    "changeType": "Primary outcome replaced",
-    "severity": "Signal",
+    "changeType": "PRIMARY_REPLACED",
+    "severity": "SIGNAL",
     "signalVersion": 14,
     "versions": [
       {
@@ -618,20 +675,84 @@
     ]
   };
 
-  // The trials the index view lists. One entry today; adding a trial to the
-  // aggregate index is adding an NCT id here plus a getTrial() case — no
-  // other code changes.
-  const INDEX_NCT_IDS = ["NCT04280705"];
-
 /* =========================================================================
-   2. DATA ACCESS — the one seam between "hardcoded" and "real".
+   2. DATA ACCESS — fetch the v0.6 API; fall back to embedded DEMO data if
+      there's no API to ask (this file opened as file://, or served standalone
+      by something other than ctcm.api without the backend behind it).
+
+      Whether the API exists at all is probed once via /healthz and cached, then
+      gates every other call. This has to be a separate probe rather than "did
+      /api/trials/{nct} 404" -- a real 404 from the real API (unknown NCT id) and
+      a 404 from, say, a plain static file server with no backend at all are the
+      same HTTP status and are NOT the same situation: one is an honest answer
+      ("no such trial"), the other means DEMO fallback. Conflating them was a
+      real bug caught in browser verification (serving ui/ over a bare static
+      server showed "No trial found for NCT04280705" instead of the DEMO row).
    ========================================================================= */
+  let apiAvailable = null;
+  async function checkApiAvailable() {
+    if (apiAvailable !== null) return apiAvailable;
+    try {
+      const res = await fetch("/healthz");
+      apiAvailable = res.ok;
+    } catch (e) {
+      apiAvailable = false;
+    }
+    return apiAvailable;
+  }
+
   async function getTrial(nctId) {
-    if (nctId === TRIAL_DATA.nctId) return TRIAL_DATA;
-    return null;
-    // Swap for the live pipeline:
-    //   const res = await fetch('/api/trials/' + encodeURIComponent(nctId));
-    //   return res.ok ? res.json() : null;
+    if (await checkApiAvailable()) {
+      try {
+        const res = await fetch("/api/trials/" + encodeURIComponent(nctId));
+        if (res.ok) return res.json();
+        if (res.status === 404) return null; // the real API's honest answer
+      } catch (e) { /* network hiccup after all -- fall through to DEMO below */ }
+    }
+    return nctId === TRIAL_DATA.nctId ? TRIAL_DATA : null;
+  }
+
+  // Index rows the DEMO fallback shows when there's no server to ask: one row,
+  // derived from TRIAL_DATA the same way the real API derives a headline finding
+  // (severity/changeType/signalVersion stand in for the pipeline's pick).
+  function demoIndexResponse() {
+    const sv = TRIAL_DATA.versions.find((v) => v.version === TRIAL_DATA.signalVersion);
+    const days = daysBetween(sv.date, TRIAL_DATA.enrolmentStart);
+    const row = {
+      nctId: TRIAL_DATA.nctId,
+      sponsor: TRIAL_DATA.sponsor,
+      sponsorClass: TRIAL_DATA.sponsorClass,
+      phase: TRIAL_DATA.phase,
+      conditions: ["COVID-19"],
+      overallStatus: "COMPLETED",
+      enrolmentCount: null,
+      versionCount: TRIAL_DATA.versions.length,
+      severity: TRIAL_DATA.severity,
+      changeType: TRIAL_DATA.changeType,
+      daysAfterEnrolment: days,
+      daysAfterPrimaryCompletion: daysBetween(sv.date, TRIAL_DATA.primaryCompletion),
+      rationale: "Primary outcome replaced " + days + " days after enrolment began (v0 → v" + TRIAL_DATA.signalVersion + ").",
+      adjudication: null
+    };
+    return {
+      rows: [row],
+      total: 1,
+      counts: { trials: 1, signalTrials: 1, postCompletionTrials: 0, caveat: "DEMO mode (no server) — showing embedded ACTT-1 data only." }
+    };
+  }
+
+  async function fetchIndex(params) {
+    if (await checkApiAvailable()) {
+      const qs = new URLSearchParams();
+      for (const [key, values] of Object.entries(params || {})) {
+        (Array.isArray(values) ? values : [values]).forEach((v) => v && qs.append(key, v));
+      }
+      try {
+        const res = await fetch("/api/trials?" + qs.toString());
+        if (res.ok) return res.json();
+      } catch (e) { /* fall through to DEMO below */ }
+    }
+    return demoIndexResponse();
   }
 
 /* =========================================================================
@@ -732,46 +853,93 @@
   }
 
 /* =========================================================================
-   5. INDEX VIEW
+   5. INDEX VIEW — filter chips/search/sort drive server-side query params
+      (api-brief: GET /api/trials?severity=&change_type=&...&sort=). One
+      unfiltered fetch on load supplies the fixed chip-value lists and the case
+      studies strip; every filter/sort/search change re-fetches just the table.
    ========================================================================= */
-  function summarize(trial) {
-    const sv = trial.versions.find((v) => v.version === trial.signalVersion);
-    return {
-      nctId: trial.nctId,
-      briefTitle: trial.briefTitle,
-      severity: trial.severity,
-      changeType: trial.changeType,
-      sponsorClass: trial.sponsorClass,
-      phase: trial.phase,
-      daysAfterEnrolment: daysBetween(sv.date, trial.enrolmentStart)
-    };
+  function phaseLabel(p) {
+    if (!p) return "—";
+    if (p === "NA") return "N/A";
+    return p.split(",").map((x) => x.replace("PHASE", "Phase ")).join(" / ");
   }
 
-  function phaseLabel(p) {
-    return p ? p.replace("PHASE", "Phase ") : "—";
+  // Top SIGNAL trials by |days after primary completion| — same ranking the API
+  // uses to pick each row's headline finding, reused here to pick the strip.
+  function pickCaseStudies(rows) {
+    return rows
+      .filter((r) => r.severity === "SIGNAL" && r.rationale)
+      .slice()
+      .sort((a, b) => Math.abs(b.daysAfterPrimaryCompletion ?? -Infinity) - Math.abs(a.daysAfterPrimaryCompletion ?? -Infinity))
+      .slice(0, 5);
+  }
+
+  function caseStudiesHtml(rows) {
+    const picks = pickCaseStudies(rows);
+    if (!picks.length) return "";
+    const cards = picks.map((r) =>
+      '<a class="case-card" href="#/trial/' + encodeURIComponent(r.nctId) + '">' +
+        '<span class="case-card-id mono">' + r.nctId + "</span>" +
+        '<p class="case-card-story">' + escapeHtml(r.rationale) + "</p>" +
+      "</a>"
+    ).join("");
+    return (
+      '<section class="case-studies" aria-label="Case studies">' +
+        '<p class="case-studies-heading">Case studies</p>' +
+        '<div class="case-list">' + cards + "</div>" +
+      "</section>"
+    );
   }
 
   let indexSort = { key: "daysAfterEnrolment", dir: -1 };
   let indexFilters = { severity: new Set(), changeType: new Set(), sponsorClass: new Set(), phase: new Set() };
+  let indexQuery = "";
+  let indexRequestSeq = 0; // guards against a slow, now-superseded fetch overwriting a newer one
+
+  function currentIndexParams() {
+    return {
+      severity: [...indexFilters.severity],
+      change_type: [...indexFilters.changeType],
+      sponsor_class: [...indexFilters.sponsorClass],
+      phase: [...indexFilters.phase],
+      q: indexQuery,
+      sort: (indexSort.dir === -1 ? "-" : "") + indexSort.key
+    };
+  }
+
+  async function refreshLedger() {
+    const seq = ++indexRequestSeq;
+    const data = await fetchIndex(currentIndexParams());
+    if (seq !== indexRequestSeq) return; // a newer request already landed
+    renderLedgerRows(data.rows);
+  }
 
   async function renderIndexView() {
     const app = document.getElementById("app");
-    const trials = (await Promise.all(INDEX_NCT_IDS.map(getTrial))).filter(Boolean);
-    const summaries = trials.map(summarize);
-    const changedCount = summaries.filter((s) => s.severity === "Signal").length;
+    app.innerHTML = topbarHtml() + '<main class="index-view"><p class="status-note">Loading trial index…</p></main>';
+
+    indexSort = { key: "daysAfterEnrolment", dir: -1 };
+    indexFilters = { severity: new Set(), changeType: new Set(), sponsorClass: new Set(), phase: new Set() };
+    indexQuery = "";
+
+    const data = await fetchIndex({});
+    const allRows = data.rows;
+    const counts = data.counts;
 
     const filterDefs = [
       ["severity", "Severity"], ["changeType", "Change"], ["sponsorClass", "Sponsor class"], ["phase", "Phase"]
     ];
     const chipsHtml = filterDefs.map(([key, label]) => {
-      const values = [...new Set(summaries.map((s) => key === "phase" ? phaseLabel(s.phase) : s[key]))];
+      const values = [...new Set(allRows.map((r) => r[key]).filter((v) => v !== null && v !== undefined))].sort();
       const chips = values.map((v) => {
-        const pressed = indexFilters[key].has(v);
+        const text = key === "phase" ? phaseLabel(v) : v;
         return '<button class="chip" data-filter-key="' + key + '" data-filter-value="' + escapeHtml(v) +
-               '" aria-pressed="' + pressed + '">' + escapeHtml(v) + "</button>";
+               '" aria-pressed="false">' + escapeHtml(text) + "</button>";
       }).join("");
       return '<div class="filter-group"><span class="filter-label">' + label + "</span>" + chips + "</div>";
     }).join("");
+
+    const changedCount = counts.signalTrials;
 
     app.innerHTML =
       topbarHtml() +
@@ -780,9 +948,15 @@
           '<p class="eyebrow">Registry change monitor — index</p>' +
           "<h1><span class=\"counter\">" + changedCount + "</span> trial" + (changedCount === 1 ? "" : "s") +
             " changed " + (changedCount === 1 ? "its" : "their") + " primary outcome after enrolment began</h1>" +
-          '<p class="tagline">Every version below was public the entire time.</p>' +
+          '<p class="tagline">Every version below was public the entire time. ' + escapeHtml(counts.caveat) + "</p>" +
         "</section>" +
-        '<section class="filters" role="group" aria-label="Filter trials">' + chipsHtml + "</section>" +
+        caseStudiesHtml(allRows) +
+        '<section class="filters" role="group" aria-label="Filter trials">' + chipsHtml +
+          '<div class="search-group">' +
+            '<span class="filter-label">Search</span>' +
+            '<input type="search" class="search-input" id="index-search" placeholder="NCT ID, sponsor, condition…">' +
+          "</div>" +
+        "</section>" +
         '<div class="table-wrap"><table class="ledger" id="ledger">' +
           "<thead><tr>" +
             '<th data-sort="nctId">Trial<span class="sort-arrow"></span></th>' +
@@ -795,35 +969,21 @@
         "</table></div>" +
       "</main>";
 
-    wireIndexInteractions(summaries);
-    renderLedgerRows(summaries);
+    wireIndexInteractions();
+    renderLedgerRows(allRows); // no filters active yet: identical to the filtered result
   }
 
-  function applyIndexFilters(summaries) {
-    return summaries.filter((s) =>
-      ["severity", "changeType", "sponsorClass"].every((key) =>
-        indexFilters[key].size === 0 || indexFilters[key].has(s[key])
-      ) &&
-      (indexFilters.phase.size === 0 || indexFilters.phase.has(phaseLabel(s.phase)))
-    );
-  }
-
-  function renderLedgerRows(summaries) {
-    const rows = applyIndexFilters(summaries).slice().sort((a, b) => {
-      const av = a[indexSort.key], bv = b[indexSort.key];
-      if (av < bv) return -1 * indexSort.dir;
-      if (av > bv) return 1 * indexSort.dir;
-      return 0;
-    });
+  function renderLedgerRows(rows) {
     const tbody = document.querySelector("#ledger tbody");
     tbody.innerHTML = rows.length ? rows.map((s) =>
       '<tr data-nct="' + s.nctId + '" tabindex="0">' +
-        '<td><span class="nct-link mono">' + s.nctId + "</span><br>" + escapeHtml(s.briefTitle) + "</td>" +
-        "<td>" + escapeHtml(s.changeType) + "</td>" +
-        '<td><span class="tag severity-' + s.severity.toLowerCase() + '">' + s.severity + "</span></td>" +
-        "<td>" + s.sponsorClass + "</td>" +
+        '<td><span class="nct-link mono">' + s.nctId + "</span><br>" +
+          escapeHtml((s.conditions && s.conditions.length ? s.conditions.join(", ") : s.sponsor) || "") + "</td>" +
+        "<td>" + (s.changeType ? escapeHtml(s.changeType) : "—") + "</td>" +
+        "<td>" + (s.severity ? '<span class="tag severity-' + s.severity.toLowerCase() + '">' + s.severity + "</span>" : "—") + "</td>" +
+        "<td>" + (s.sponsorClass || "—") + "</td>" +
         "<td>" + phaseLabel(s.phase) + "</td>" +
-        '<td class="mono">' + fmtDaysAfterEnrolment(s.daysAfterEnrolment) + "</td>" +
+        '<td class="mono">' + (s.daysAfterEnrolment != null ? fmtDaysAfterEnrolment(s.daysAfterEnrolment) : "—") + "</td>" +
       "</tr>"
     ).join("") : '<tr class="empty-row"><td colspan="6">No trials match the selected filters.</td></tr>';
 
@@ -834,14 +994,14 @@
     });
   }
 
-  function wireIndexInteractions(summaries) {
+  function wireIndexInteractions() {
     document.querySelectorAll(".chip").forEach((chip) => {
       chip.addEventListener("click", () => {
         const { filterKey, filterValue } = chip.dataset;
         const set = indexFilters[filterKey];
         set.has(filterValue) ? set.delete(filterValue) : set.add(filterValue);
         chip.setAttribute("aria-pressed", set.has(filterValue));
-        renderLedgerRows(summaries);
+        refreshLedger();
       });
     });
     document.querySelectorAll("#ledger th[data-sort]").forEach((th) => {
@@ -851,8 +1011,14 @@
         indexSort.key = key;
         document.querySelectorAll("#ledger th .sort-arrow").forEach((a) => (a.textContent = ""));
         th.querySelector(".sort-arrow").textContent = indexSort.dir === 1 ? "↑" : "↓";
-        renderLedgerRows(summaries);
+        refreshLedger();
       });
+    });
+    let searchDebounce = null;
+    document.getElementById("index-search").addEventListener("input", (e) => {
+      indexQuery = e.target.value.trim();
+      clearTimeout(searchDebounce);
+      searchDebounce = setTimeout(refreshLedger, 150);
     });
   }
 
@@ -885,27 +1051,37 @@
     return 50;
   }
 
+  // Verified against the live Record History "Compare" flow (2026-08-08, see
+  // ctcm/api.py:_compare_url — same formula, kept in sync by hand since there's
+  // no shared module between Python and this file): a/b are 1-indexed display
+  // versions, int-API version 0 == displayed "Version 1".
+  function compareUrl(trial, vFrom, vTo) {
+    return trial.historyUrl + "&a=" + (vFrom + 1) + "&b=" + (vTo + 1) + "#version-content-panel";
+  }
+
   async function renderTrialView(nctId) {
     const app = document.getElementById("app");
     const trial = await getTrial(nctId);
     if (!trial) {
       app.innerHTML = topbarHtml() +
         '<main><a class="back-link" href="#/">&larr; All trials</a>' +
-        "<p>No hardcoded data for " + escapeHtml(nctId) + " yet.</p></main>";
+        '<p class="status-note">No trial found for ' + escapeHtml(nctId) + ".</p></main>";
       return;
     }
 
     const n = trial.versions.length;
+    const signalVersions = new Set((trial.findings || []).filter((f) => f.severity === "SIGNAL").map((f) => f.toVersion));
     const nodesHtml = trial.versions.map((v, i) =>
       '<div class="v-marker" style="left:' + nodePercent(i, n) + '%">' +
-        '<button class="v-node" data-index="' + i + '" aria-pressed="false" ' +
-          'aria-label="Version ' + v.version + ", " + v.date + '"></button>' +
+        '<button class="v-node' + (signalVersions.has(v.version) ? " has-signal" : "") + '" data-index="' + i +
+          '" aria-pressed="false" aria-label="Version ' + v.version + ", " + v.date +
+          (signalVersions.has(v.version) ? " (flagged change)" : "") + '"></button>' +
         '<span class="v-label mono">v' + v.version + "</span>" +
       "</div>"
     ).join("");
 
-    const enrolPct = refLinePercent(trial.enrolmentStart, trial.versions);
-    const compPct = refLinePercent(trial.primaryCompletion, trial.versions);
+    const enrolPct = trial.enrolmentStart ? refLinePercent(trial.enrolmentStart, trial.versions) : null;
+    const compPct = trial.primaryCompletion ? refLinePercent(trial.primaryCompletion, trial.versions) : null;
 
     app.innerHTML =
       topbarHtml() +
@@ -916,21 +1092,23 @@
             '<span class="nct-id mono">' + trial.nctId + "</span>" +
             '<span class="status-pill" id="status-pill"></span>' +
           "</div>" +
-          '<h1 class="trial-title">' + escapeHtml(trial.briefTitle) + "</h1>" +
-          '<p class="trial-official">' + escapeHtml(trial.officialTitle) + "</p>" +
+          '<h1 class="trial-title">' + escapeHtml(trial.briefTitle || trial.nctId) + "</h1>" +
+          (trial.officialTitle ? '<p class="trial-official">' + escapeHtml(trial.officialTitle) + "</p>" : "") +
           '<div class="trial-meta">' +
-            "<span><strong>" + escapeHtml(trial.sponsor) + "</strong></span>" +
+            "<span><strong>" + escapeHtml(trial.sponsor || "Sponsor unknown") + "</strong></span>" +
             "<span>" + phaseLabel(trial.phase) + "</span>" +
-            "<span>Enrolment began <strong class=\"mono\">" + trial.enrolmentStart + "</strong></span>" +
-            "<span>Primary completion (actual) <strong class=\"mono\">" + trial.primaryCompletion + "</strong></span>" +
+            "<span>Enrolment began <strong class=\"mono\">" + (trial.enrolmentStart || "unknown") + "</strong>" +
+              (trial.enrolmentStartType ? " (" + trial.enrolmentStartType.toLowerCase() + ")" : "") + "</span>" +
+            "<span>Primary completion <strong class=\"mono\">" + (trial.primaryCompletion || "unknown") + "</strong>" +
+              (trial.primaryCompletionType ? " (" + trial.primaryCompletionType.toLowerCase() + ")" : "") + "</span>" +
           "</div>" +
         "</div>" +
 
         '<section class="scrubber" aria-label="Version scrubber">' +
           '<div class="scrubber-scroll"><div class="scrubber-track">' +
             '<div class="timeline-baseline"></div>' +
-            '<div class="ref-line" style="left:' + enrolPct + '%"><span class="ref-label">Enrolment began</span></div>' +
-            '<div class="ref-line" style="left:' + compPct + '%"><span class="ref-label">Primary completion</span></div>' +
+            (enrolPct != null ? '<div class="ref-line" style="left:' + enrolPct + '%"><span class="ref-label">Enrolment began</span></div>' : "") +
+            (compPct != null ? '<div class="ref-line" style="left:' + compPct + '%"><span class="ref-label">Primary completion</span></div>' : "") +
             nodesHtml +
             '<div class="playhead" id="playhead" style="left:' + nodePercent(0, n) + '%"></div>' +
           "</div></div>" +
@@ -1035,16 +1213,17 @@
   function renderOutcomePanel(trial, idx) {
     const cur = trial.versions[idx];
     const prev = idx > 0 ? trial.versions[idx - 1] : null;
-    const daysAfterEnrolment = daysBetween(cur.date, trial.enrolmentStart);
-    const daysAfterCompletion = daysBetween(cur.date, trial.primaryCompletion);
+    const daysAfterEnrolment = trial.enrolmentStart ? daysBetween(cur.date, trial.enrolmentStart) : null;
+    const daysAfterCompletion = trial.primaryCompletion ? daysBetween(cur.date, trial.primaryCompletion) : null;
 
     document.getElementById("readout-version").textContent = "v" + cur.version;
     document.getElementById("readout-date").textContent = cur.date;
     const daysEl = document.getElementById("readout-days");
-    daysEl.textContent = fmtDaysAfterEnrolment(daysAfterEnrolment);
-    daysEl.className = "readout-days mono " + timingClass(daysAfterEnrolment, daysAfterCompletion);
-    document.getElementById("readout-status").textContent = cur.overallStatus.replace(/_/g, " ");
-    document.getElementById("status-pill").textContent = cur.overallStatus.replace(/_/g, " ");
+    daysEl.textContent = daysAfterEnrolment != null ? fmtDaysAfterEnrolment(daysAfterEnrolment) : "enrolment date unknown";
+    daysEl.className = "readout-days mono " + (daysAfterEnrolment != null ? timingClass(daysAfterEnrolment, daysAfterCompletion) : "");
+    const statusText = cur.overallStatus ? cur.overallStatus.replace(/_/g, " ") : "—";
+    document.getElementById("readout-status").textContent = statusText;
+    document.getElementById("status-pill").textContent = statusText;
 
     const curP = cur.primaryOutcomes[0] || { measure: "—", description: "", timeFrame: "—" };
     const prevP = prev ? (prev.primaryOutcomes[0] || { measure: "", description: "", timeFrame: "" }) : null;
@@ -1079,9 +1258,13 @@
     }
 
     const linksEl = document.getElementById("deep-links");
-    linksEl.innerHTML = "Compare on ClinicalTrials.gov: " +
-      (prev ? '<a href="' + trial.historyUrl + '" target="_blank" rel="noopener">v' + prev.version + " · " + prev.date + " ↗</a> vs " : "") +
-      '<a href="' + trial.historyUrl + '" target="_blank" rel="noopener">v' + cur.version + " · " + cur.date + " ↗</a>";
+    linksEl.innerHTML = prev
+      ? "Compare on ClinicalTrials.gov: " +
+        '<a href="' + compareUrl(trial, prev.version, cur.version) + '" target="_blank" rel="noopener">v' + prev.version + " · " + prev.date + "</a> vs " +
+        '<a href="' + compareUrl(trial, prev.version, cur.version) + '" target="_blank" rel="noopener">v' + cur.version + " · " + cur.date + " ↗</a>"
+      : "View on ClinicalTrials.gov: " +
+        '<a href="' + trial.historyUrl + "&a=" + (cur.version + 1) + '#version-content-panel" target="_blank" rel="noopener">v' +
+          cur.version + " · " + cur.date + " ↗</a>";
   }
 </script>
 </body>
