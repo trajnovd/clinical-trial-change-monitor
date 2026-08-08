@@ -3,3 +3,5 @@ data/
 __pycache__/
 *.pyc
 .superpowers/
+*.egg-info/
+.pytest_cache/
