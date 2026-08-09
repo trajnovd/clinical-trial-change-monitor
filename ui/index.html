@@ -451,6 +451,42 @@
   }
   .deep-links a { margin: 0 .2rem; }
 
+  /* ---------- published reports (Task 13) ---------- */
+  .published-reports { margin-top: 2rem; }
+  .published-reports .card-label { margin-bottom: .8rem; }
+  .pub-list { display: flex; flex-direction: column; gap: .8rem; }
+  .pub-row {
+    background: var(--paper-raised);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: .8rem 1rem;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: .35rem .7rem;
+  }
+  .pub-tier {
+    font-family: var(--mono);
+    font-size: .66rem;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    padding: .15rem .5rem;
+    border-radius: 4px;
+    white-space: nowrap;
+  }
+  /* confidence gradient, not a severity signal -- HIGH earns the solid accent fill
+     used for confirmed things elsewhere on this page, LOW (10-40x noisier, see
+     ctcm/publink.py) gets the least visual weight, an outline only. */
+  .pub-tier-high { background: var(--accent-soft); color: var(--accent); }
+  .pub-tier-medium { background: var(--neutral-soft); color: var(--ink); }
+  .pub-tier-low { color: var(--ink-muted); border: 1px solid var(--line); }
+  .pub-title { font-size: .92rem; flex: 1 1 16rem; }
+  .pub-title a { text-decoration: none; }
+  .pub-title a:hover { text-decoration: underline; }
+  .pub-meta { font-size: .78rem; color: var(--ink-muted); }
+  .pub-oa { font-size: .7rem; color: var(--accent); }
+  .pub-timing { flex-basis: 100%; font-size: .82rem; color: var(--ink-muted); margin: .1rem 0 0; }
+
   @media (max-width: 30rem) {
     main { padding: 1.25rem 1rem 3rem; }
     .filters { gap: .6rem 1rem; }
@@ -1076,6 +1112,50 @@
     return trial.historyUrl + "&a=" + (vFrom + 1) + "&b=" + (vTo + 1) + "#version-content-panel";
   }
 
+  // ---- Published reports (Task 13) ----------------------------------------------
+  // Tier badge copy is deliberate, per ctcm/publink.py's tier definitions: HIGH is a
+  // curated PubMed databank-accession linkage, MEDIUM is an NCT ID in the paper's own
+  // abstract, LOW is any indexed mention at all (10-40x noisier) -- LOW must never
+  // read as "the trial's paper," only as "mentions this trial."
+  function pubTierLabel(tier) {
+    if (tier === "HIGH") return "Trial report";
+    if (tier === "MEDIUM") return "Likely trial report";
+    return "Mentions this trial";
+  }
+
+  function publicationRowHtml(p) {
+    const link = p.doi ? "https://doi.org/" + encodeURIComponent(p.doi)
+      : p.pmid ? "https://pubmed.ncbi.nlm.nih.gov/" + encodeURIComponent(p.pmid) + "/"
+      : null;
+    const titleHtml = escapeHtml(p.title || "(title unavailable)");
+    const titleEl = link
+      ? '<a href="' + link + '" target="_blank" rel="noopener">' + titleHtml + "</a>"
+      : titleHtml;
+    const meta = [p.journal, p.pubDate].filter(Boolean).map(escapeHtml).join(" · ");
+    return (
+      '<li class="pub-row">' +
+        '<span class="pub-tier pub-tier-' + p.tier.toLowerCase() + '">' + pubTierLabel(p.tier) + "</span>" +
+        '<span class="pub-title">' + titleEl + "</span>" +
+        (meta ? '<span class="pub-meta mono">' + meta + "</span>" : "") +
+        (p.oa ? '<span class="pub-oa mono">open access</span>' : "") +
+        // Factual date arithmetic only (ctcm.publink.days_after_change) -- never a
+        // claim about what the paper says.
+        (p.timingNote ? '<p class="pub-timing">' + escapeHtml(p.timingNote) + "</p>" : "") +
+      "</li>"
+    );
+  }
+
+  function publishedReportsHtml(trial) {
+    const pubs = trial.publications || [];
+    if (!pubs.length) return "";
+    return (
+      '<section class="card published-reports" aria-label="Published reports">' +
+        '<p class="card-label">Published reports</p>' +
+        '<ul class="pub-list">' + pubs.map(publicationRowHtml).join("") + "</ul>" +
+      "</section>"
+    );
+  }
+
   async function renderTrialView(nctId) {
     const app = document.getElementById("app");
     const trial = await getTrial(nctId);
@@ -1156,6 +1236,7 @@
             "</div>" +
           "</div>" +
         "</div>" +
+        publishedReportsHtml(trial) +
       "</main>";
 
     initScrubber(trial);

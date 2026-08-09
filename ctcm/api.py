@@ -11,6 +11,9 @@ not on the do-not-touch list) and is exactly what the brief asks for: timeline
 anchors computed via ctcm.timeline.anchors. ctcm.adjudicate is stable (commit
 138072b) and its content_hash() is imported rather than reimplemented here, so
 the join key has exactly one definition (see the Adjudications section below).
+ctcm.publink (Task 13, this file's own agent) is imported for its pure
+days_after_change() date-arithmetic helper -- one definition shared with the
+publications table it also owns, rather than a second copy of the same math here.
 """
 
 import gzip
@@ -26,19 +29,21 @@ from fastapi.responses import FileResponse
 
 from ctcm import config
 from ctcm.adjudicate import content_hash
+from ctcm.publink import days_after_change
 from ctcm.timeline import anchors as compute_anchors
 
 UI_PATH = config.REPO_ROOT / "ui" / "index.html"
 
-# Verbatim from scripts/headline.py's CLI caveat (v0.2 checkpoint) -- same corpus,
-# same selection-bias fact, kept consistent across both surfaces rather than each
-# inventing its own wording.
+# Reader-facing subtitle copy (Task 13 fix): scripts/headline.py's CLI caveat
+# (kept as-is, that's a coordinator-facing terminal tool) used the same selection-bias
+# fact but ended in internal-audience process language ("Lead with the
+# post-enrolment-primary-change number above instead"). This is the copy the UI's
+# index subtitle actually renders to a reader, so it says what the corpus is and why,
+# without instructing anyone on which number to lead with.
 RESULTS_POSTED_CAVEAT = (
-    "this corpus is results-posted trials only (ingest discovery query requires "
-    "ResultsFirstPostDate) -- sponsors routinely add/adjust outcome rows around "
-    "results entry as registry housekeeping, not editorial endpoint-switching, so "
-    "POST_COMPLETION_CHANGE is an upper bound, not a purity signal. Lead with the "
-    "post-enrolment-primary-change number above instead."
+    "This corpus is limited to completed trials that posted results, which makes "
+    "post-completion registry edits common; the count above reflects primary-outcome "
+    "changes after enrolment began."
 )
 
 # One finding per trial, picked the same way case-study candidates are picked
@@ -194,6 +199,52 @@ def _trial_titles(nct_id: str, version_nos: list[int]) -> tuple[str | None, str 
 def _overall_status_at(nct_id: str, version_no: int) -> str | None:
     ps = _protocol_section(nct_id, version_no)
     return ((ps or {}).get("statusModule") or {}).get("overallStatus")
+
+
+def _publications(conn: sqlite3.Connection, nct_id: str, signal_change_date: str | None) -> list[dict]:
+    """Published reports linked to this trial (Task 13, ctcm.publink), highest tier
+    first. `signal_change_date` is the to_version's version_date of the trial's most
+    significant SIGNAL finding (None if it has none) -- when a publication's pub_date
+    postdates it, `daysAfterSignalChange`/`timingNote` carry the factual "published N
+    days after the primary outcome changed" line. This is date arithmetic only: no
+    claim about what the paper says, low-tier hits included (UI is responsible for
+    badging them as "mentions this trial," never "the trial's paper")."""
+    if not _table_exists(conn, "publications"):
+        return []
+    rows = conn.execute(
+        "SELECT pmid, doi, title, journal, pub_date, oa, tier, source FROM publications WHERE nct_id=? "
+        "ORDER BY CASE tier WHEN 'HIGH' THEN 0 WHEN 'MEDIUM' THEN 1 ELSE 2 END, pub_date DESC",
+        (nct_id,),
+    ).fetchall()
+    out = []
+    for r in rows:
+        days = days_after_change(r["pub_date"], signal_change_date)
+        out.append(
+            {
+                "pmid": r["pmid"],
+                "doi": r["doi"],
+                "title": _ue(r["title"]),
+                "journal": _ue(r["journal"]),
+                "pubDate": r["pub_date"],
+                "oa": None if r["oa"] is None else bool(r["oa"]),
+                "tier": r["tier"],
+                "source": r["source"],
+                "daysAfterSignalChange": days,
+                "timingNote": f"published {days} days after the primary outcome changed" if days else None,
+            }
+        )
+    return out
+
+
+def _signal_change_date(findings: list[dict], version_dates: dict[int, str | None]) -> str | None:
+    """to_version's version_date of the trial's most significant SIGNAL finding, same
+    tie-break HEADLINE_FINDING_SQL uses (largest |days after primary completion|).
+    None if the trial has no SIGNAL finding."""
+    signal = [f for f in findings if f["severity"] == "SIGNAL"]
+    if not signal:
+        return None
+    chosen = max(signal, key=lambda f: abs(f["daysAfterPrimaryCompletion"] or 0))
+    return version_dates.get(chosen["toVersion"])
 
 
 def _compare_url(nct_id: str, vfrom: int, vto: int) -> str:
@@ -367,6 +418,9 @@ def get_trial(nct_id: str):
                 "SELECT * FROM findings WHERE nct_id=? ORDER BY from_version, to_version, finding_id", (nct_id,)
             )
         ]
+
+        version_dates = {v["version_no"]: v["version_date"] for v in versions}
+        publications = _publications(conn, nct_id, _signal_change_date(findings, version_dates))
     finally:
         conn.close()
 
@@ -389,6 +443,7 @@ def get_trial(nct_id: str):
         "historyUrl": f"{config.CT_GOV_BASE}/study/{nct_id}?tab=history",
         "versions": version_objs,
         "findings": findings,
+        "publications": publications,
     }
 
 

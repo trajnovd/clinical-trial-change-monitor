@@ -1,13 +1,15 @@
 """ctcm/api.py against a small fixture db (tmp_path, built via ctcm.db.connect() same
 as test_pipeline.py) -- no network, no dependency on the real data/ctcm.db. Covers the
-filtering/sort/q contract, the trial-detail shape, 404, and the two adjudications-table
-states (absent -- the common case today -- and present with either key strategy)."""
+filtering/sort/q contract, the trial-detail shape, 404, the two adjudications-table
+states (absent -- the common case today -- and present with either key strategy), and
+the publications array (Task 13, absent-table and populated states)."""
 
 from fastapi.testclient import TestClient
 
 from ctcm import config, db
 from ctcm.adjudicate import content_hash, ensure_schema
 from ctcm.api import app
+from ctcm.publink import upsert_publications
 
 client = TestClient(app)
 
@@ -100,7 +102,7 @@ def test_list_trials_returns_both_with_headline_counts(tmp_path, monkeypatch):
     assert body["total"] == 2
     assert {row["nctId"] for row in body["rows"]} == {"NCT1", "NCT2"}
     assert body["counts"] == {"trials": 2, "signalTrials": 1, "postCompletionTrials": 0, "caveat": body["counts"]["caveat"]}
-    assert "results-posted" in body["counts"]["caveat"]
+    assert "completed trials that posted results" in body["counts"]["caveat"]
 
     nct2_row = next(row for row in body["rows"] if row["nctId"] == "NCT2")
     assert nct2_row["severity"] is None
@@ -255,3 +257,65 @@ def test_adjudication_unreviewed_is_suppressed(tmp_path, monkeypatch):
 
     detail = client.get("/api/trials/NCT1").json()
     assert detail["findings"][0]["adjudication"] is None
+
+
+def test_get_trial_publications_empty_when_no_publications_table(tmp_path, monkeypatch):
+    """Common case for a fixture (or a not-yet-run-publink corpus): no publications
+    table exists at all -- degrades to an empty list, not a 500."""
+    _fixture_db(tmp_path, monkeypatch)
+    detail = client.get("/api/trials/NCT1").json()
+    assert detail["publications"] == []
+
+
+def test_get_trial_publications_shape_tier_order_and_timing_note(tmp_path, monkeypatch):
+    """NCT1's fixture SIGNAL finding (v0->v1) has to_version=1, version_date
+    2020-02-01 -- the trial's only SIGNAL finding, so that's the reference change
+    date. A LOW-tier pub before that date gets no timing note; a HIGH-tier pub after
+    it does, and rows are ordered HIGH before LOW regardless of insertion order."""
+    _fixture_db(tmp_path, monkeypatch)
+    conn = db.connect()
+    upsert_publications(
+        conn, "NCT1",
+        [
+            {
+                "pmid": "222", "doi": None, "title": "Early mention", "journal": "J Noise", "pub_date": "2020-01-15",
+                "oa": 0, "tier": "LOW", "source": "epmc_fulltext",
+            },
+            {
+                "pmid": "111", "doi": "10.1/x", "title": "The trial report", "journal": "NEJM", "pub_date": "2020-06-01",
+                "oa": 1, "tier": "HIGH", "source": "epmc_abstract+pubmed_si",
+            },
+        ],
+    )
+    conn.close()
+
+    pubs = client.get("/api/trials/NCT1").json()["publications"]
+    assert [p["pmid"] for p in pubs] == ["111", "222"]  # HIGH before LOW
+
+    high = pubs[0]
+    assert high["tier"] == "HIGH"
+    assert high["title"] == "The trial report"
+    assert high["oa"] is True
+    assert high["daysAfterSignalChange"] == 121  # 2020-06-01 minus 2020-02-01
+    assert high["timingNote"] == "published 121 days after the primary outcome changed"
+
+    low = pubs[1]
+    assert low["tier"] == "LOW"
+    assert low["oa"] is False
+    assert low["daysAfterSignalChange"] is None  # predates the change -- no "after" claim
+    assert low["timingNote"] is None
+
+
+def test_get_trial_publications_no_timing_note_without_a_signal_finding(tmp_path, monkeypatch):
+    _fixture_db(tmp_path, monkeypatch)
+    conn = db.connect()
+    upsert_publications(
+        conn, "NCT2",
+        [{"pmid": "1", "doi": None, "title": "T", "journal": None, "pub_date": "2099-01-01", "oa": None, "tier": "MEDIUM", "source": "epmc_abstract"}],
+    )
+    conn.close()
+
+    pubs = client.get("/api/trials/NCT2").json()["publications"]
+    assert pubs[0]["daysAfterSignalChange"] is None
+    assert pubs[0]["timingNote"] is None
+    assert pubs[0]["oa"] is None
