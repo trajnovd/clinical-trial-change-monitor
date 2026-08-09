@@ -192,8 +192,19 @@ Volunteered here rather than left for someone else to find first.
   and the extraction layer degrades gracefully (defaults to `None`/missing)
   rather than failing, which means a poorly-registered trial can also
   under-report findings simply because there's less to diff.
-- **US registry only.** ClinicalTrials.gov exclusively; no coverage of EU
-  CTIS, ISRCTN, or other national/regional registries.
+- **EU CTIS coverage is prospective only — no backfill exists anywhere.**
+  `ctcm/ctis.py` (v2) adds the EU Clinical Trials Information System, but
+  CTIS's public API (`search`/`retrieve`) serves current state only — the
+  pre-2024-06-17 relaunch system reportedly exposed a version-history field
+  that no longer exists (see `docs/methodology.md` §11). There is no
+  registry-side history to pull, so this product builds its own: each
+  `scripts/run_ctis.py --snapshot` pass keeps a dated snapshot only when a
+  trial's outcome-relevant content changed since the last one kept. A CTIS
+  trial's history starts on the day it is first snapshotted, not on the day
+  it was registered — a trial watched starting today will show zero findings
+  today and findings only as real future changes are observed, never for
+  anything that happened before adoption. ISRCTN and other national/regional
+  registries remain unsupported.
 - **Bounded corpus.** The working corpus is capped at `CORPUS_LIMIT`
   (default 800 trials via discovery, 1,220 currently loaded once the Holst
   benchmark trials are folded in) — a deliberate scope bound for this
@@ -230,9 +241,11 @@ Volunteered here rather than left for someone else to find first.
 
 - `ctcm/` — the library: `ingest.py`, `extract.py`, `normalize.py`,
   `match.py` (cascade), `timeline.py` (anchoring), `classify.py` (taxonomy),
-  `pipeline.py` (orchestration), `adjudicate.py`, `api.py`, `db.py`.
+  `pipeline.py` (orchestration), `adjudicate.py`, `api.py`, `db.py`,
+  `ctis.py` (v2, EU CTIS adapter — prospective only, see "Documented
+  limitations" and `docs/methodology.md` §11).
 - `scripts/` — CLI entry points (`run_ingest.py`, `run_pipeline.py`,
-  `run_adjudicate.py`, `headline.py`, `show_history.py`).
+  `run_adjudicate.py`, `headline.py`, `show_history.py`, `run_ctis.py`).
 - `benchmark/` — Holst ground-truth mapping, split protocol, and results.
 - `ui/index.html` — the timeline scrubber (single file, no build step).
 - `docs/methodology.md` — full detection methodology, deviations, upgrade paths.

@@ -1,0 +1,68 @@
+{
+  "ctNumber": "2025-523333-26-00",
+  "ctStatus": "Under evaluation",
+  "decisionDate": "2026-08-07T18:27:53.587",
+  "publishDate": "2026-08-08T03:38:55.439869754",
+  "ctPublicStatusCode": 1,
+  "authorizedApplication": {
+    "authorizedPartI": {
+      "rowSubjectCount": 85,
+      "medicalConditions": [
+        {
+          "id": 144000,
+          "medicalCondition": "Graves' Disease (GD)"
+        }
+      ],
+      "sponsors": [
+        {
+          "primary": true,
+          "organisation": {
+            "name": "Argenx",
+            "type": "Pharmaceutical company"
+          }
+        }
+      ],
+      "trialDetails": {
+        "trialInformation": {
+          "trialCategory": {
+            "isLowIntervention": false,
+            "trialPhase": "5",
+            "trialCategory": "2",
+            "justificationForTrialCategory": "This is a Phase 3 study",
+            "trialCategoryId": 127065
+          },
+          "endPoint": {
+            "primaryEndPoints": [
+              {
+                "id": 1093256,
+                "number": 1,
+                "endPoint": "1. Percentage of participants who are euthyroid (fT3, fT4, and TSH within normal ranges) off ATDs at week 24 in part A",
+                "isPrimary": true
+              }
+            ],
+            "secondaryEndPoints": [
+              {
+                "id": 1093257,
+                "number": 1,
+                "endPoint": "1. Time to becoming euthyroid off ATDs in part A",
+                "isPrimary": false
+              },
+              {
+                "id": 1093258,
+                "number": 2,
+                "endPoint": "2. Percentage of participants who are euthyroid and receiving MMI ≤5 mg/day or CBZ ≤7.5 mg/day at week 24 in part A",
+                "isPrimary": false
+              },
+              {
+                "id": 1093259,
+                "number": 3,
+                "endPoint": "3. Percentage of participants with fT3 and fT4 levels below the ULN off ATDs at week 24 in part A",
+                "isPrimary": false
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

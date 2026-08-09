@@ -329,3 +329,77 @@ the code it affects, not just here.
   results-entry housekeeping. This is why the README leads with the
   post-enrolment-primary-change number rather than this one — see
   `scripts/headline.py`'s own caveat text.
+
+## 11. EU CTIS adapter: prospective-only coverage (`ctcm/ctis.py`)
+
+**Plainly: EU coverage is prospective from the date this product first
+snapshots a trial. No backfill exists anywhere — not in this product, not
+in CTIS itself.** CTIS (euclinicaltrials.eu) runs a public, unauthenticated
+REST API (`search` + `retrieve/{ctNumber}`, verified live 2026-08-09,
+`.superpowers/sdd/2026-08-08-trial-registry-monitor/v2-research.md`), but it
+serves **current state only**. The pre-2024-06-17 relaunch system reportedly
+exposed a version-history field (`applications`) that the live system today
+does not — confirmed by reading the `ctrdata` R package's own loader source
+and doc comments (v2-research.md's "decisive evidence"). There is no
+"give me this trial as of date X" call to fall back on, and no bulk history
+export. Findings for a CTIS trial can therefore only ever describe changes
+this product itself observed happening — never anything that happened before
+the trial was first added to the watchlist and snapshotted.
+
+**What this product builds instead.** `ctcm.ctis.snapshot_pass(ct_numbers)`
+polls `GET /retrieve/{ctNumber}` for each watched trial and keeps a new
+gzipped copy (`data/cache/ctis/{ctNumber}/snap-{YYYY-MM-DD}.json.gz`) *only*
+when its outcome-relevant content hash differs from the most recently kept
+snapshot (or none exists yet) — the same sha256-of-canonical-JSON discipline
+`ctcm/extract.py` uses for CT.gov's `versions.content_hash`. Every kept
+snapshot IS a version, by construction; there is no separate "which fetched
+revision is worth keeping" fetch rule the way CT.gov's real history needs,
+because CTIS never hands over more than one revision (the current one) per
+call. `ctcm.ctis.CTISAdapter` implements the same `RegistryAdapter` protocol
+`ctcm/monitor.py` defined for CT.gov (commit `42d31f3`), but purely as a
+local reader over that snapshot series — unlike `CTGovAdapter`, it never
+touches the network, because for CTIS "check for a new version" and "fetch
+the live state" collapse into the same single call.
+
+**Field mapping.** `ctcm.ctis.map_outcomes()` reads primary/secondary
+endpoints from `authorizedApplication.authorizedPartI.trialDetails
+.trialInformation.endPoint.{primary,secondary}EndPoints` into the same
+outcomes shape (`outcome_type` PRIMARY/SECONDARY, `measure`) CT.gov rows
+use — `time_frame` is left `NULL`: CTIS has no dedicated per-endpoint
+timeframe field the way CT.gov's `outcomesModule[].timeFrame` does, and
+regex-guessing one out of the free-text endpoint description was judged
+worse than an honest `NULL`. `ctcm.ctis.map_meta()` maps sponsor, condition,
+phase (a small code table built from codes observed live — an unseen code
+is stored as `"CODE_{n}"`, never guessed), and enrolment count similarly.
+`timeline_facts` is intentionally left unpopulated for CTIS trials — field
+mapping was scoped to the outcomes schema only; `ctcm.timeline.anchors()`
+and `ctcm.classify.classify()` already handle a trial with no timeline facts
+by defaulting severity to `SIGNAL` rather than suppressing the finding (§5),
+so this is a silent-but-correct degradation, not a crash risk.
+
+**Naming debt.** `trials.nct_id` is a `TEXT PRIMARY KEY` sized and named for
+ClinicalTrials.gov's NCT format. CTIS rows store their ctNumber (format
+`2025-523333-26-00`) in that same column — no schema change, no collision
+(the formats never overlap), but the column name is a misnomer for a fifth
+of the table now. `trials.registry` (`'ctgov'` default | `'ctis'`, added via
+a guarded `ALTER TABLE`, same pattern as `ctcm.monitor.ensure_schema`'s
+`findings.first_seen_at`) is what actually distinguishes the two.
+
+**Starter watchlist.** `scripts/run_ctis.py --bootstrap` searches CTIS for
+phase-3 trials (`searchCriteria.trialPhaseCode: ["5"]`, verified live)
+sorted by `decisionDate` descending, approximating "ongoing/recruiting"
+client-side via `resultsFirstReceived == "No"` — CTIS's `/search` exposes no
+verified recruitment-status filter key (several plausible key names were
+probed live and silently ignored; unknown `searchCriteria` keys return the
+full unfiltered result set rather than an error, which is itself a footgun
+worth knowing about this API). This is a documented approximation, not a
+precise recruiting filter: it correctly excludes trials whose results are
+already posted, and correctly includes everything else, including trials
+that are authorised but not yet actively recruiting.
+
+**Findings flow through the same pipeline, unchanged.** Once
+`snapshot_pass()` upserts rows into `trials`/`versions`/`outcomes`,
+`ctcm.pipeline.run_pipeline()` — completely unmodified, already iterating
+every `nct_id` in `trials` regardless of registry — picks up CTIS trials
+exactly like CT.gov ones the next time `make pipeline` runs. No CTIS-specific
+branch exists anywhere in the diff/classify/severity code.
