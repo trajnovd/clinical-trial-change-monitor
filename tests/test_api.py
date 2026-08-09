@@ -319,3 +319,51 @@ def test_get_trial_publications_no_timing_note_without_a_signal_finding(tmp_path
     assert pubs[0]["daysAfterSignalChange"] is None
     assert pubs[0]["timingNote"] is None
     assert pubs[0]["oa"] is None
+
+
+def test_signal_change_date_matches_headline_finding_sql_on_secondary_tiebreak(tmp_path, monkeypatch):
+    """Regression for task13-review.md Important #2: _signal_change_date must use
+    the same 4-level tie-break as HEADLINE_FINDING_SQL (severity, |days after
+    primary completion| desc, |days after enrolment| desc, finding_id asc) --  not
+    stop at the second level. Two SIGNAL findings tie on |daysAfterPrimaryCompletion|
+    but differ on |daysAfterEnrolment|: finding A (to_version=1, lower finding_id,
+    sorts first in the findings list) has the SMALLER enrolment magnitude; finding B
+    (to_version=2, higher finding_id) has the larger one. Only a tie-break that
+    actually consults days_after_enrolment picks B -- a naive "first max on a tie"
+    implementation (the pre-fix code) would silently pick A instead."""
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "test.db")
+    conn = db.connect()
+    conn.execute(
+        "INSERT INTO trials(nct_id, study_type, phase, overall_status, lead_sponsor, sponsor_class, "
+        "conditions, enrolment_count, first_posted_date, version_count) VALUES "
+        "('NCT9', 'INTERVENTIONAL', 'PHASE3', 'COMPLETED', 'S', 'NIH', '[]', 10, '2020-01-01', 3)"
+    )
+    for v, d in [(0, "2020-01-01"), (1, "2020-03-01"), (2, "2020-05-01")]:
+        conn.execute(
+            "INSERT INTO versions(nct_id, version_no, version_date, module_labels) VALUES ('NCT9', ?, ?, '[]')", (v, d)
+        )
+    conn.execute(
+        "INSERT INTO findings(finding_id, nct_id, from_version, to_version, change_type, severity, before_measure, "
+        "after_measure, days_after_enrolment, days_after_primary_completion, confidence, resolved_by, rationale) "
+        "VALUES (10, 'NCT9', 0, 1, 'PRIMARY_REPLACED', 'SIGNAL', 'a', 'b', 10, 100, 1.0, 'T0', 'r')"
+    )
+    conn.execute(
+        "INSERT INTO findings(finding_id, nct_id, from_version, to_version, change_type, severity, before_measure, "
+        "after_measure, days_after_enrolment, days_after_primary_completion, confidence, resolved_by, rationale) "
+        "VALUES (11, 'NCT9', 0, 2, 'PRIMARY_REPLACED', 'SIGNAL', 'a', 'c', 50, 100, 1.0, 'T0', 'r')"
+    )
+    conn.commit()
+    upsert_publications(
+        conn, "NCT9",
+        [{"pmid": "1", "doi": None, "title": "T", "journal": None, "pub_date": "2020-06-01", "oa": None, "tier": "HIGH", "source": "pubmed_si"}],
+    )
+    conn.close()
+
+    pub = client.get("/api/trials/NCT9").json()["publications"][0]
+    # correct headline finding is B (v0->v2): 2020-06-01 minus v2's 2020-05-01 = 31 days.
+    # the pre-fix bug would resolve to v1's 2020-03-01 instead (92 days) -- a decisively
+    # different, wrong answer, not just an off-by-one.
+    assert pub["daysAfterSignalChange"] == 31
+    assert pub["timingNote"] == "published 31 days after the primary outcome changed"

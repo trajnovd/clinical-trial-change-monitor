@@ -226,6 +226,68 @@ def test_get_json_retries_on_429_then_succeeds(monkeypatch):
     assert calls["n"] == 3
 
 
+def test_pubmed_si_sends_explicit_retmax():
+    """eutils esearch defaults to retmax=20 with no warning -- HIGH tier must never
+    rely on that default (Important #1, task13-review.md)."""
+    seen = {}
+
+    def handler(request):
+        seen["retmax"] = request.url.params.get("retmax")
+        return httpx.Response(200, json={"esearchresult": {"count": "3", "idlist": ["1", "2", "3"]}})
+
+    transport = httpx.MockTransport(handler)
+
+    async def run():
+        async with httpx.AsyncClient(transport=transport) as client:
+            return await publink._pubmed_si(client, "NCTZ")
+
+    asyncio.run(run())
+    assert seen["retmax"] == str(publink.SI_RETMAX)
+
+
+def test_pubmed_si_refetches_when_count_exceeds_retmax():
+    """A fake esearch response advertising count > SI_RETMAX (so the idlist that
+    comes back is itself truncated) must trigger a second call with retmax=count,
+    not silently truncate -- the same shape as the live NCT00000620 bug (real
+    count=109 vs the unset-retmax default of 20; here count=600 vs SI_RETMAX=500)."""
+    real_count = publink.SI_RETMAX + 100
+    calls = []
+
+    def handler(request):
+        retmax = int(request.url.params["retmax"])
+        calls.append(retmax)
+        # eutils truncates idlist to min(retmax, count) but always reports the real count
+        ids = [str(i) for i in range(min(retmax, real_count))]
+        return httpx.Response(200, json={"esearchresult": {"count": str(real_count), "idlist": ids}})
+
+    transport = httpx.MockTransport(handler)
+
+    async def run():
+        async with httpx.AsyncClient(transport=transport) as client:
+            return await publink._pubmed_si(client, "NCT00000620")
+
+    result = asyncio.run(run())
+    assert calls == [publink.SI_RETMAX, real_count]  # exactly one refetch, sized to the real count
+    assert len(result["esearchresult"]["idlist"]) == real_count
+
+
+def test_pubmed_si_no_refetch_when_result_fits():
+    calls = []
+
+    def handler(request):
+        calls.append(int(request.url.params["retmax"]))
+        return httpx.Response(200, json={"esearchresult": {"count": "3", "idlist": ["1", "2", "3"]}})
+
+    transport = httpx.MockTransport(handler)
+
+    async def run():
+        async with httpx.AsyncClient(transport=transport) as client:
+            return await publink._pubmed_si(client, "NCTZ")
+
+    asyncio.run(run())
+    assert calls == [publink.SI_RETMAX]  # no second call needed
+
+
 def test_fetch_raw_cached_skips_network_when_cache_present(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "CACHE_DIR", tmp_path)
     cached = {"si": {"esearchresult": {"idlist": ["1"]}}, "abstract": {}, "fulltext": {}}

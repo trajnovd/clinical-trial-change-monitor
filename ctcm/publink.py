@@ -43,6 +43,15 @@ MAX_RETRIES = 5
 LOW_TIER_PAGE_SIZE = 100  # ponytail: single-page cap on the noisy free-text query,
 # not full recall (ACTT-1 alone hits 371) -- upgrade path: paginate if a downstream
 # consumer needs every low-tier mention rather than the top-ranked ones.
+ABSTRACT_TIER_PAGE_SIZE = 100  # same value as LOW_TIER_PAGE_SIZE, named separately:
+# abstract-tier hit counts are always far below 100 per v2-research.md, so this is
+# effectively "get all," not a deliberate noise cap like the low-tier one.
+
+# eutils esearch defaults to retmax=20 with NO warning in the response when a real
+# count exceeds it -- unlike LOW_TIER_PAGE_SIZE's *deliberate* cap, this one is a
+# silent truncation bug on the HIGH (curated) tier if left unset: verified live,
+# NCT00000620 has 109 [si]-linked papers, only 20 came back with no retmax at all.
+SI_RETMAX = 500
 
 EUTILS_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 EPMC_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
@@ -187,9 +196,24 @@ def _cache_path(nct: str) -> Path:
     return config.CACHE_DIR / "publink" / f"{nct}.json"
 
 
+async def _pubmed_si(client: httpx.AsyncClient, nct: str) -> dict:
+    """PubMed eutils esearch for the [si] curated linkage. Sets retmax explicitly
+    (SI_RETMAX) instead of taking eutils' undocumented default of 20 -- HIGH is the
+    curated tier and must never silently truncate. Belt-and-braces: if the real
+    `count` still exceeds what came back (a trial with >SI_RETMAX linked papers),
+    refetch once with retmax=count rather than quietly dropping the rest."""
+    params = {"db": "pubmed", "term": f"{nct}[si]", "retmode": "json", "retmax": SI_RETMAX}
+    resp = await _get_json(client, EUTILS_URL, params)
+    result = resp.get("esearchresult") or {}
+    count = int(result.get("count") or 0)
+    if count > len(result.get("idlist") or []):
+        resp = await _get_json(client, EUTILS_URL, {**params, "retmax": count})
+    return resp
+
+
 async def _fetch_raw(client: httpx.AsyncClient, nct: str) -> dict:
-    si = await _get_json(client, EUTILS_URL, {"db": "pubmed", "term": f"{nct}[si]", "retmode": "json"})
-    abstract = await _get_json(client, EPMC_URL, {"query": f'ABSTRACT:"{nct}"', "format": "json", "pageSize": 100})
+    si = await _pubmed_si(client, nct)
+    abstract = await _get_json(client, EPMC_URL, {"query": f'ABSTRACT:"{nct}"', "format": "json", "pageSize": ABSTRACT_TIER_PAGE_SIZE})
     fulltext = await _get_json(client, EPMC_URL, {"query": f'"{nct}"', "format": "json", "pageSize": LOW_TIER_PAGE_SIZE})
     return {"si": si, "abstract": abstract, "fulltext": fulltext}
 

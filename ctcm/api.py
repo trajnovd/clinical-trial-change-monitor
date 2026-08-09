@@ -46,8 +46,12 @@ RESULTS_POSTED_CAVEAT = (
     "changes after enrolment began."
 )
 
-# One finding per trial, picked the same way case-study candidates are picked
-# (severity first, then |days after primary completion|): the row's headline.
+# One finding per trial, picked the same way case-study candidates are picked:
+# severity first, then |days after primary completion| desc, then |days after
+# enrolment| desc, then finding_id asc as the final deterministic tiebreak -- the
+# row's headline. _headline_key() below replicates this exact ORDER BY in Python
+# for _signal_change_date's single-trial use (get_trial has no SQL window function
+# handy there); if this ORDER BY ever changes, _headline_key must change with it.
 HEADLINE_FINDING_SQL = """
     SELECT nct_id, finding_id, from_version, to_version, change_type, severity,
            days_after_enrolment, days_after_primary_completion, rationale,
@@ -236,14 +240,27 @@ def _publications(conn: sqlite3.Connection, nct_id: str, signal_change_date: str
     return out
 
 
+def _headline_key(f: dict) -> tuple[int, int, int, int]:
+    """Sort key replicating HEADLINE_FINDING_SQL's ORDER BY exactly (see the comment
+    above that SQL string) -- the single definition both "pick this trial's headline
+    finding" call sites key off, so they cannot quietly diverge: severity (SIGNAL
+    first), then |days after primary completion| desc, then |days after enrolment|
+    desc, then finding_id asc. min() over this tuple picks the same row rn=1 would."""
+    return (
+        0 if f["severity"] == "SIGNAL" else 1,
+        -abs(f["daysAfterPrimaryCompletion"] or 0),
+        -abs(f["daysAfterEnrolment"] or 0),
+        f["findingId"],
+    )
+
+
 def _signal_change_date(findings: list[dict], version_dates: dict[int, str | None]) -> str | None:
-    """to_version's version_date of the trial's most significant SIGNAL finding, same
-    tie-break HEADLINE_FINDING_SQL uses (largest |days after primary completion|).
-    None if the trial has no SIGNAL finding."""
+    """to_version's version_date of the trial's headline SIGNAL finding (_headline_key,
+    same ORDER BY as HEADLINE_FINDING_SQL). None if the trial has no SIGNAL finding."""
     signal = [f for f in findings if f["severity"] == "SIGNAL"]
     if not signal:
         return None
-    chosen = max(signal, key=lambda f: abs(f["daysAfterPrimaryCompletion"] or 0))
+    chosen = min(signal, key=_headline_key)
     return version_dates.get(chosen["toVersion"])
 
 
