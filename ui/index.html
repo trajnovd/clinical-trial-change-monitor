@@ -103,6 +103,14 @@
     font-size: .8rem;
     color: var(--ink-muted);
   }
+  .topbar-nav { margin-left: auto; display: flex; gap: 1.2rem; }
+  .topbar-nav a {
+    font-family: var(--mono);
+    font-size: .82rem;
+    text-decoration: none;
+    color: var(--ink-muted);
+  }
+  .topbar-nav a:hover { color: var(--accent); }
 
   main { max-width: 78rem; margin: 0 auto; padding: 2rem 1.5rem 4rem; }
 
@@ -234,6 +242,32 @@
   }
   .tag.severity-signal { background: var(--flag-soft); color: var(--flag); }
   .empty-row td { text-align: center; color: var(--ink-muted); padding: 2rem; white-space: normal; }
+
+  /* ---------- analytics view (Task 16) ---------- */
+  .analytics-table-section { margin-bottom: 2.5rem; }
+  .analytics-section-title {
+    font-family: var(--mono);
+    font-size: .82rem;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    color: var(--ink-muted);
+    margin-bottom: .8rem;
+  }
+  table.analytics-table th:last-child, table.analytics-table td:last-child { width: 55%; }
+  tr.drill-row { cursor: pointer; }
+  tr.drill-row:hover { background: var(--accent-soft); }
+  .bar-cell { display: flex; align-items: center; gap: .7rem; white-space: nowrap; }
+  .bar-track {
+    flex: 1;
+    height: 8px;
+    min-width: 4rem;
+    border-radius: 999px;
+    background: var(--neutral-soft);
+    overflow: hidden;
+  }
+  .bar-fill { display: block; height: 100%; background: var(--accent); border-radius: 999px; }
+  .bar-label { font-size: .82rem; color: var(--ink-muted); }
+  .analytics-empty-note { font-size: .85rem; color: var(--ink-muted); margin-bottom: 1rem; }
 
   /* ---------- trial view ---------- */
   .back-link {
@@ -793,6 +827,20 @@
     return demoIndexResponse();
   }
 
+  // No DEMO fallback here (unlike getTrial/fetchIndex above): the analytics view's
+  // aggregations only mean something over the live corpus, and a single-trial
+  // embedded fixture (TRIAL_DATA) can't stand in for a sponsor-level rate table
+  // without fabricating numbers this view exists specifically to be honest about.
+  async function fetchAnalytics() {
+    if (await checkApiAvailable()) {
+      try {
+        const res = await fetch("/api/analytics");
+        if (res.ok) return res.json();
+      } catch (e) { /* fall through */ }
+    }
+    return null;
+  }
+
 /* =========================================================================
    3. UTILITIES — dates, escaping, word-level LCS diff.
    ========================================================================= */
@@ -877,8 +925,14 @@
     const hash = location.hash || "#/";
     const m = hash.match(/^#\/trial\/([^/]+)/);
     activeScrubber = null; // leaving (or not yet on) the trial view disarms arrow-key scrubbing
-    if (m) await renderTrialView(decodeURIComponent(m[1]));
-    else await renderIndexView();
+    if (m) { await renderTrialView(decodeURIComponent(m[1])); return; }
+    if (hash.match(/^#\/analytics/)) { await renderAnalyticsView(); return; }
+    // "#/" or "#/?sponsorClass=INDUSTRY" etc. — drill-down links from the analytics
+    // view (see analyticsDrillHref below) encode one filter as a query string after
+    // the index route; everything else lands here as the plain unfiltered index.
+    const qsIdx = hash.indexOf("?");
+    const initialParams = qsIdx >= 0 ? new URLSearchParams(hash.slice(qsIdx + 1)) : null;
+    await renderIndexView(initialParams);
   }
 
   function topbarHtml() {
@@ -886,6 +940,7 @@
       '<header class="topbar">' +
         '<a class="brand" href="#/">Redline</a>' +
         '<span class="brand-sub">Clinical Trial Registry Change Monitor</span>' +
+        '<nav class="topbar-nav"><a href="#/analytics">Analytics</a></nav>' +
       "</header>"
     );
   }
@@ -967,13 +1022,22 @@
     renderLedgerRows(data.rows);
   }
 
-  async function renderIndexView() {
+  async function renderIndexView(initialParams) {
     const app = document.getElementById("app");
     app.innerHTML = topbarHtml() + '<main class="index-view"><p class="status-note">Loading trial index…</p></main>';
 
     indexSort = { key: "daysAfterEnrolment", dir: -1 };
     indexFilters = { severity: new Set(), changeType: new Set(), sponsorClass: new Set(), phase: new Set() };
     indexQuery = "";
+    // Drill-down from the analytics view: one filter key (sponsorClass/phase) or a
+    // search query (sponsor, matched via the existing free-text `q` param — there's
+    // no dedicated server-side sponsor filter) preset before the first fetch.
+    if (initialParams) {
+      ["severity", "changeType", "sponsorClass", "phase"].forEach((key) => {
+        initialParams.getAll(key).forEach((v) => indexFilters[key].add(v));
+      });
+      indexQuery = initialParams.get("q") || "";
+    }
 
     const data = await fetchIndex({});
     const allRows = data.rows;
@@ -986,8 +1050,9 @@
       const values = [...new Set(allRows.map((r) => r[key]).filter((v) => v !== null && v !== undefined))].sort();
       const chips = values.map((v) => {
         const text = key === "phase" ? phaseLabel(v) : v;
+        const pressed = indexFilters[key].has(v);
         return '<button class="chip" data-filter-key="' + key + '" data-filter-value="' + escapeHtml(v) +
-               '" aria-pressed="false">' + escapeHtml(text) + "</button>";
+               '" aria-pressed="' + pressed + '">' + escapeHtml(text) + "</button>";
       }).join("");
       return '<div class="filter-group"><span class="filter-label">' + label + "</span>" + chips + "</div>";
     }).join("");
@@ -1007,7 +1072,8 @@
         '<section class="filters" role="group" aria-label="Filter trials">' + chipsHtml +
           '<div class="search-group">' +
             '<span class="filter-label">Search</span>' +
-            '<input type="search" class="search-input" id="index-search" placeholder="NCT ID, sponsor, condition…">' +
+            '<input type="search" class="search-input" id="index-search" placeholder="NCT ID, sponsor, condition…" value="' +
+              escapeHtml(indexQuery) + '">' +
           "</div>" +
         "</section>" +
         '<div class="table-wrap"><table class="ledger" id="ledger">' +
@@ -1023,7 +1089,9 @@
       "</main>";
 
     wireIndexInteractions();
-    renderLedgerRows(allRows); // no filters active yet: identical to the filtered result
+    const hasInitialFilter = indexQuery || Object.values(indexFilters).some((s) => s.size);
+    if (hasInitialFilter) await refreshLedger(); // drill-down from analytics: fetch filtered
+    else renderLedgerRows(allRows); // no filters active: identical to the filtered result
   }
 
   function renderLedgerRows(rows) {
@@ -1072,6 +1140,128 @@
       indexQuery = e.target.value.trim();
       clearTimeout(searchDebounce);
       searchDebounce = setTimeout(refreshLedger, 150);
+    });
+  }
+
+/* =========================================================================
+   5b. ANALYTICS VIEW (Task 16) — table-first, inline bar spans via CSS width%
+       (no chart lib, per the brief). GET /api/analytics returns seven
+       aggregations sharing one shape family: either {signalTrials,totalTrials,
+       rate} (sponsor/class/phase/year/condition rate tables) or {count,total,
+       rate} (the timing histogram and adjudication concern mix, which count
+       findings/adjudications rather than trials) — analyticsTableHtml renders
+       either via the numField/denField it's told to read.
+
+       Drill-down (brief: "every sponsor/class/phase row clickable"): a row's
+       href is one filter encoded as an index-view query string (#/?phase=...),
+       parsed back out by route()/renderIndexView above. Sponsor has no
+       dedicated server-side filter param, so it drills down via the existing
+       free-text search (`q`) instead — same mechanism, different param name.
+       Year/condition/timing/adjudication rows are display-only: the brief
+       scopes drill-down to sponsor/class/phase specifically, and /api/trials
+       has no year or condition filter to drill into anyway.
+   ========================================================================= */
+  function ratePct(rate) {
+    return Math.round(rate * 1000) / 10; // one decimal place
+  }
+
+  // Copy rule (brief): rates are always "N of M (P%)", never a bare percentage —
+  // the bar's width is the same P, so the visual and the text never disagree.
+  function rateCellHtml(numerator, denominator, rate) {
+    const p = ratePct(rate);
+    return (
+      '<td><div class="bar-cell">' +
+        '<span class="bar-track"><span class="bar-fill" style="width:' + p + '%"></span></span>' +
+        '<span class="bar-label mono">' + numerator + " of " + denominator + " (" + p + "%)</span>" +
+      "</div></td>"
+    );
+  }
+
+  function analyticsTableHtml(sectionTitle, columnLabel, rows, keyField, numField, denField, drillHrefFn) {
+    if (!rows || !rows.length) return "";
+    // Rate-shape tables (sponsor/class/phase/year/condition): column 2 is the
+    // group's own size, i.e. the bar's denominator (totalTrials). Count-shape
+    // tables (histogram/concern mix) share one grand total across every row
+    // (denField), so their group size is the bar's numerator (count) instead --
+    // showing denField there would print the same total on every row.
+    const isCountShape = numField === "count";
+    const sizeField = isCountShape ? numField : denField;
+    const countLabel = isCountShape ? "Findings" : "Trials";
+    const rateLabel = isCountShape ? "Share" : "Signal rate";
+    const bodyRows = rows.map((r) => {
+      const href = drillHrefFn ? "#/?" + drillHrefFn(r) : null;
+      const label = keyField === "phase" ? phaseLabel(r[keyField]) : (r[keyField] ?? "—");
+      return (
+        "<tr" + (href ? ' class="drill-row" data-href="' + href + '" tabindex="0"' : "") + ">" +
+          "<td>" + escapeHtml(String(label)) + "</td>" +
+          '<td class="mono">' + r[sizeField] + "</td>" +
+          rateCellHtml(r[numField], r[denField], r.rate) +
+        "</tr>"
+      );
+    }).join("");
+    return (
+      '<section class="analytics-table-section">' +
+        '<h2 class="analytics-section-title">' + escapeHtml(sectionTitle) + "</h2>" +
+        '<div class="table-wrap"><table class="ledger analytics-table">' +
+          "<thead><tr><th>" + escapeHtml(columnLabel) + "</th><th>" + countLabel + "</th><th>" + rateLabel + "</th></tr></thead>" +
+          "<tbody>" + bodyRows + "</tbody>" +
+        "</table></div>" +
+      "</section>"
+    );
+  }
+
+  async function renderAnalyticsView() {
+    const app = document.getElementById("app");
+    app.innerHTML = topbarHtml() + '<main class="analytics-view"><p class="status-note">Loading analytics…</p></main>';
+
+    const data = await fetchAnalytics();
+    if (!data) {
+      app.innerHTML = topbarHtml() +
+        '<main class="analytics-view">' +
+          '<a class="back-link" href="#/">&larr; All trials</a>' +
+          '<p class="status-note">Analytics needs the live API (no server responding at /api/analytics).</p>' +
+        "</main>";
+      return;
+    }
+
+    const sponsorNote = data.signalRateBySponsor.length
+      ? ""
+      : '<p class="analytics-empty-note">No sponsor in this corpus has the ≥5 trials this table requires.</p>';
+
+    const sections = [
+      analyticsTableHtml("Signal rate by sponsor (≥5 trials)", "Sponsor", data.signalRateBySponsor,
+        "sponsor", "signalTrials", "totalTrials", (r) => "q=" + encodeURIComponent(r.sponsor)),
+      analyticsTableHtml("Signal rate by sponsor class", "Sponsor class", data.bySponsorClass,
+        "sponsorClass", "signalTrials", "totalTrials", (r) => "sponsorClass=" + encodeURIComponent(r.sponsorClass)),
+      analyticsTableHtml("Signal rate by phase", "Phase", data.byPhase,
+        "phase", "signalTrials", "totalTrials", (r) => "phase=" + encodeURIComponent(r.phase)),
+      analyticsTableHtml("Signal rate by year first posted", "Year", data.byYear,
+        "year", "signalTrials", "totalTrials", null),
+      analyticsTableHtml("Top conditions", "Condition", data.topConditions,
+        "condition", "signalTrials", "totalTrials", null),
+      analyticsTableHtml("Timing of primary-outcome changes, relative to enrolment", "Days after enrolment", data.timingHistogram,
+        "bucket", "count", "total", null),
+      analyticsTableHtml("Adjudication concern mix", "Concern level", data.adjudicationConcernMix,
+        "concern", "count", "total", null),
+    ].join("");
+
+    app.innerHTML =
+      topbarHtml() +
+      '<main class="analytics-view">' +
+        '<a class="back-link" href="#/">&larr; All trials</a>' +
+        '<section class="masthead">' +
+          '<p class="eyebrow">Registry change monitor — analytics</p>' +
+          "<h1>Sponsor analytics</h1>" +
+          '<p class="tagline">' + escapeHtml(data.caveat) + "</p>" +
+        "</section>" +
+        sponsorNote +
+        sections +
+      "</main>";
+
+    document.querySelectorAll(".drill-row").forEach((tr) => {
+      const go = () => { location.hash = tr.dataset.href; };
+      tr.addEventListener("click", go);
+      tr.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
     });
   }
 

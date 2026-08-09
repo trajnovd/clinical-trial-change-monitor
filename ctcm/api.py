@@ -27,7 +27,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
-from ctcm import config
+from ctcm import analytics, config
 from ctcm.adjudicate import content_hash
 from ctcm.publink import days_after_change
 from ctcm.timeline import anchors as compute_anchors
@@ -462,6 +462,37 @@ def get_trial(nct_id: str):
         "findings": findings,
         "publications": publications,
     }
+
+
+@app.get("/api/analytics")
+def get_analytics():
+    """Task 16: sponsor/class/phase/year/condition/timing aggregations (ctcm.analytics),
+    all sharing the /api/trials index header's caveat -- this corpus is completed,
+    results-posted trials only, which makes post-completion registry edits common."""
+    conn = _connect()
+    try:
+        by_sponsor = analytics.signal_rate_by_sponsor(conn)
+        top_conditions = analytics.top_conditions(conn)
+        payload = {
+            "signalRateBySponsor": by_sponsor,
+            "bySponsorClass": analytics.by_sponsor_class(conn),
+            "byPhase": analytics.by_phase(conn),
+            "byYear": analytics.by_year(conn),
+            "topConditions": top_conditions,
+            "timingHistogram": analytics.timing_histogram(conn),
+            "adjudicationConcernMix": analytics.adjudication_concern_mix(conn),
+            "caveat": RESULTS_POSTED_CAVEAT,
+        }
+    finally:
+        conn.close()
+    # HTML-entity decode at the API boundary (see _ue's docstring above) -- sponsor and
+    # condition are the only two free-text registry fields analytics.py's aggregations
+    # group by; sponsor_class/phase/year/bucket/concern are all our own fixed vocabulary.
+    for row in by_sponsor:
+        row["sponsor"] = _ue(row["sponsor"])
+    for row in top_conditions:
+        row["condition"] = _ue(row["condition"])
+    return payload
 
 
 @app.get("/", include_in_schema=False)
