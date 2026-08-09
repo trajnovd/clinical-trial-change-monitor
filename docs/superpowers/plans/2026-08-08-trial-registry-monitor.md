@@ -260,3 +260,45 @@ Full report: headline number, benchmark table, tier mix, UI demo, limitations �
 
 - Spec coverage: PRD §3.1 output fields → findings table + trial API; §6.3 taxonomy → Task 6; TECH §6.2 date trap → Task 5; §5.1 dangerous cases → Task 7 tests; §7 adjudication → Task 8; §8 benchmark → Task 9; §9 interface → Tasks 10–11; preflight P1 done (2026-08-08, ACTT-1), P2 folded into v0.2 headline, P3 folded into Task 2.
 - Deliberate scope bounds vs TECH-PRD, reported honestly at checkpoints: bounded corpus (CORPUS_LIMIT, expandable); no GPU cross-encoder (rule T2 + LLM T3); no human κ study (needs humans); EU registries roadmap-only (per PRD).
+
+---
+
+# v2 — Beyond the registry-only index
+
+Grounded in .superpowers/sdd/2026-08-08-trial-registry-monitor/v2-research.md (2026-08-09): CTIS public API is current-state only (native history removed in the 2024-06-17 relaunch) → EU coverage requires OUR OWN prospective snapshot+diff subsystem, no backfill. Europe PMC linking is viable free/no-auth; full-text NCT mentions run 10-40× noisier than actual trial reports → confidence tiers required.
+
+Global constraints carry over verbatim (tone rules, deterministic-first, caching, honest caveats). New: publication linking LINKS papers only — we do not parse paper content (PRD explicitly defers that); every link carries a confidence tier and its evidence.
+
+### Task 13 (v2.1): Publication linking
+
+**Files:** Create `ctcm/publink.py`, `scripts/run_publink.py`, `tests/test_publink.py`; extend `ctcm/api.py` + `ui/index.html` (publications on trial view + case-study cards).
+
+- Sources per NCT: (a) PubMed eutils `[si]` curated linkage (high tier), (b) Europe PMC `ABSTRACT:"NCT#"` (medium), (c) EPMC full-text mention (low). Table `publications(nct_id, pmid, doi, title, journal, pub_date, oa, tier, source, PRIMARY KEY(nct_id, pmid))`; cached responses in data/cache/publink/ keyed by nct; resumable; bounded concurrency 4; backoff on 429.
+- API: publications array on GET /api/trials/{nct}; UI: "Published reports" list with tier badges + a factual timeline note when pub_date > change date of a SIGNAL finding ("published N days after the primary outcome changed") — no claims about the paper's content.
+- Tests: tier assignment, join, date arithmetic — fixtures only, no network.
+
+### Task 14 (v2.2): Continuous monitoring
+
+**Files:** Create `ctcm/monitor.py`, `scripts/run_monitor.py`, `tests/test_monitor.py`.
+
+- `check_updates(nct_ids)` — HEAD-style: refetch history list only, compare version count vs versions table; fetch only NEW versions into cache; run extract+pipeline for changed trials; emit new findings to `data/monitor_log.jsonl` + a `first_seen_at` column on findings (ALTER TABLE ADD COLUMN, default null = pre-monitoring).
+- `--watch corpus|file.txt`, `--once` (cron-friendly single pass; no daemon — Makefile `monitor` target documents a cron line instead).
+- The snapshot differ must be source-agnostic enough that Task 15 reuses it (interface: registry adapter provides `list_versions(id)` + `fetch_version(id, v)`; CT.gov adapter = existing ingest functions refactored behind that interface WITHOUT changing their behaviour — regression-guard with existing tests).
+
+### Task 15 (v2.3): EU CTIS adapter — prospective only
+
+**Files:** Create `ctcm/ctis.py`, `scripts/run_ctis.py`, `tests/test_ctis.py`.
+
+- CTIS public API (endpoints verified in v2-research.md): search + retrieve current state. Snapshot on each monitor pass into `data/cache/ctis/{ctNumber}/snap-{date}.json.gz`; OUR versions = successive snapshots that differ on outcome-relevant fields (content-hash gate). Map CTIS outcome/endpoint fields into the outcomes schema (registry column added to trials; nct_id column holds the CT number — document the naming debt). Findings flow through the SAME pipeline unchanged.
+- README/methodology must state plainly: EU coverage is prospective from adoption date; no backfill exists anywhere.
+- Bounded scope: pull a starter watchlist (~200 CTIS trials, phase 3, recruiting/ongoing) on first run.
+
+### Task 16 (v2.4): Sponsor analytics
+
+**Files:** Create `ctcm/analytics.py`; extend `ctcm/api.py` (GET /api/analytics), `ui/index.html` (analytics view); `tests/test_analytics.py`.
+
+- Aggregations (SQL, deterministic): SIGNAL-trial rate by sponsor (min 5 trials), by sponsor_class, by phase, by year, by condition top-20; timing distribution (days-after-enrolment histogram buckets); adjudication concern mix where present. Every aggregate row links to its underlying trial list (drill-down = filtered index view). Copy rules: rates presented with denominators, "documented changes" language, explicit corpus-selection caveat on every analytics view.
+- UI: one analytics view, table-first with inline bar spans (no chart lib), dataviz-skill styling rules if charts appear.
+
+### v2 CHECKPOINT
+Publications with tier badges on trial pages; monitor --once detects a genuinely new registry version end-to-end; CTIS watchlist snapshotting with ≥1 real diff detected (or documented zero-diff pass); analytics view live with drill-downs. README/methodology updated for all four.
