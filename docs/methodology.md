@@ -30,13 +30,21 @@ Interventional, results posted, started in or after 2008. Capped at
 
 **Fetch rule.** For each discovered NCT ID: `GET
 /api/int/studies/{nct}/history` for the version list, then `GET
-.../history/{v}` for every version's snapshot. Both endpoints are the
-internal (`int`) API, not the public v2 one — v2 has no version-history
-endpoint. Every fetched `(nct_id, version)` snapshot is gzipped to
-`data/cache/{nct}/v{n}.json.gz`; the version list to
-`data/cache/{nct}/history.json`. A snapshot already on disk is never
-re-fetched — ingestion is resumable and re-runs are free
-(`global-constraints.md`).
+.../history/{v}` only for v0, every version whose `moduleLabels` includes
+"Outcome Measures," and the final version (`ctcm/ingest.py:fetch_trial`) —
+not every version in between. Both endpoints are the internal (`int`) API,
+not the public v2 one — v2 has no version-history endpoint. Every fetched
+`(nct_id, version)` snapshot is gzipped to `data/cache/{nct}/v{n}.json.gz`;
+the version list to `data/cache/{nct}/history.json`. A snapshot already on
+disk is never re-fetched — ingestion is resumable and re-runs are free
+(`global-constraints.md`). Consequence: anchors, revisions, and
+`TIMELINE_REVISED` detection (§5) are computed only over this fetched
+subset, not the trial's full version history — v0 is always included, so the
+earliest-recorded-date defence (§5) still holds, but a start/completion-date
+edit made in a version between two fetched snapshots (neither touching
+Outcome Measures) is invisible to this tool, and `TIMELINE_REVISED` recall is
+bounded accordingly. Fetch every version instead of this subset if that
+recall matters more than the smaller/faster ingest.
 
 **Failure isolation.** One trial's fetch failure (429, DNS, timeout) is
 caught, logged, and does not abort the batch or block any other trial

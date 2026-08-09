@@ -16,7 +16,7 @@ def main() -> None:
         "SELECT COUNT(DISTINCT nct_id) FROM findings WHERE change_type='POST_COMPLETION_CHANGE'"
     ).fetchone()
     (n_unresolved_signal,) = conn.execute(
-        "SELECT COUNT(*) FROM findings WHERE resolved_by='T2_UNRESOLVED' AND severity='SIGNAL'"
+        "SELECT COUNT(*) FROM findings WHERE resolved_by IN ('T2_UNRESOLVED', 'COLLAPSE_UNMATCHED') AND severity='SIGNAL'"
     ).fetchone()
 
     print(f"corpus: {n_trials} trials")
@@ -33,8 +33,10 @@ def main() -> None:
         print(
             f"  caveat: {n_unresolved_signal} SIGNAL findings rest on unresolved semantic "
             "matches pending T3 coverage (resolved_by='T2_UNRESOLVED' -- the cascade "
-            "escalated these but never got an LLM adjudication; confidence=0.5, not the "
-            "usual 1.0, but severity is not downgraded)."
+            "escalated these but never got an LLM adjudication -- or 'COLLAPSE_UNMATCHED' "
+            "-- a REPLACED collapse of two leftovers the cascade never scored as a "
+            "candidate pair together, so it never adjudicated this specific pairing "
+            "either; confidence=0.5, not the usual 1.0, but severity is not downgraded)."
         )
 
     print("\nby change_type:")

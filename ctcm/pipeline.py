@@ -9,7 +9,7 @@ from collections import Counter
 from datetime import date
 
 from ctcm import db
-from ctcm.classify import OutcomeRow, classify, diff_pair, timeline_revised
+from ctcm.classify import _UNRESOLVED_TIERS, OutcomeRow, classify, diff_pair, timeline_revised
 from ctcm.match import MatchResult, T3Client, match_outcomes
 from ctcm.timeline import anchors as compute_anchors
 
@@ -62,7 +62,19 @@ def _cascade_matcher(before: list[OutcomeRow], after: list[OutcomeRow], result: 
         bi = before_idx[id(before_row)] if before_row is not None else None
         ai = after_idx[id(after_row)] if after_row is not None else None
         pair = by_indices.get((bi, ai))
-        return pair.tier if pair else "T1"  # ambiguous N:M leftover -- T1 is the primary reject tier
+        if pair:
+            return pair.tier
+        # No exact (bi, ai) decision: this is a collapse-derived finding (diff_pair's
+        # own per-outcome-type REPLACED collapse of leftovers, decided by "exactly one
+        # left on each side," not by the cascade ever scoring *this* pairing). Consult
+        # each side's own best-attempted comparison -- match_outcomes' singleton
+        # leftover Pairs, keyed (bi, None)/(None, ai) -- and if either was never
+        # actually adjudicated (T2_UNRESOLVED/T3_FALLBACK), say so honestly instead of
+        # borrowing T1's full confidence for a pairing the cascade never decided.
+        side_tiers = [p.tier for p in (by_indices.get((bi, None)), by_indices.get((None, ai))) if p]
+        if any(t in _UNRESOLVED_TIERS for t in side_tiers):
+            return "COLLAPSE_UNMATCHED"
+        return "T1"  # ambiguous N:M leftover, best-attempted tier was T1 on both sides
 
     return matcher, tier_for
 

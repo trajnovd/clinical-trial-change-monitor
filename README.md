@@ -16,15 +16,19 @@ make headline                # prints the headline number + breakdowns
 ```
 
 `make all` runs `load pipeline headline` in sequence — the reproducibility
-check below runs exactly that, from the cache already committed in this
-tree, without touching the network.
+check below runs exactly that, from an already-ingested cache, without
+touching the network. `data/` is gitignored (not committed), so a fresh
+clone starts with none of that cache: run `make ingest` first (network,
+tens of minutes to a few hours depending on registry rate-limiting, for the
+~1,220-trial corpus these numbers describe) — `make all`'s own `load` step
+then picks that cache up, same as below.
 
 **UI:** `make serve` starts the API + UI at `http://127.0.0.1:8742/` — a
 timeline scrubber over any trial's outcome-measure history, plus a
 filterable index of every finding with deep links to the registry's own
 `?tab=history` compare pages.
 
-**Tests:** `make test` (147 tests, `pytest -q`).
+**Tests:** `make test` (148 tests, `pytest -q`).
 
 `make adjudicate` (multi-agent LLM review of SIGNAL findings) and `make
 benchmark` (scores findings against the Holst ground truth) both call out to
@@ -41,7 +45,7 @@ corpus: 1220 trials
 HEADLINE -- trials with >=1 post-enrolment primary change: 721
 trials with >=1 post-completion change: 616
   caveat: this corpus is results-posted trials only (ingest discovery query requires ResultsFirstPostDate) -- sponsors routinely add/adjust outcome rows around results entry as registry housekeeping, not editorial endpoint-switching, so POST_COMPLETION_CHANGE is an upper bound, not a purity signal. Lead with the post-enrolment-primary-change number above instead.
-  caveat: 110 SIGNAL findings rest on unresolved semantic matches pending T3 coverage (resolved_by='T2_UNRESOLVED' -- the cascade escalated these but never got an LLM adjudication; confidence=0.5, not the usual 1.0, but severity is not downgraded).
+  caveat: 143 SIGNAL findings rest on unresolved semantic matches pending T3 coverage (resolved_by='T2_UNRESOLVED' -- the cascade escalated these but never got an LLM adjudication -- or 'COLLAPSE_UNMATCHED' -- a REPLACED collapse of two leftovers the cascade never scored as a candidate pair together, so it never adjudicated this specific pairing either; confidence=0.5, not the usual 1.0, but severity is not downgraded).
 ```
 
 by change_type: `POST_COMPLETION_CHANGE` 2171, `TIMELINE_REVISED` 1637,
@@ -52,16 +56,19 @@ by change_type: `POST_COMPLETION_CHANGE` 2171, `TIMELINE_REVISED` 1637,
 by severity: `SIGNAL` 2598, `CONTEXT` 2149.
 
 **Reproducing the headline number.** `make all` (`load` → `pipeline` →
-`headline`) reproduces this exact output from the `data/cache/` and
-`data/ctcm.db` already in this tree, with **no network access** —
+`headline`) reproduces this exact output from an already-ingested
+`data/cache/` and `data/ctcm.db`, with **no network access** —
 `pipeline`'s T3 LLM-escalation budget defaults to `T3_LIMIT=0`, and
 `ctcm.match.T3Client` checks its sqlite cache before checking that budget, so
 every already-resolved T3 verdict still applies for free and only a
-genuinely new `claude -p` call is refused. Live escalation of the residual
-`T2_UNRESOLVED` pairs is `make pipeline T3_LIMIT=200` (or higher) — that does
-call the LLM and can change the numbers above; `adjudicate` and `benchmark`
-are the other two targets that touch the LLM/CLI and are excluded from `all`
-for the same reason.
+genuinely new `claude -p` call is refused. This holds for a tree that has
+already run `make ingest` (or received a `data/` directory out-of-band) —
+`data/` is gitignored, so a **fresh clone** has to `make ingest` (network,
+see Quickstart above) before `make all` reproduces anything. Live escalation
+of the residual `T2_UNRESOLVED` pairs is `make pipeline T3_LIMIT=200` (or
+higher) — that does call the LLM and can change the numbers above;
+`adjudicate` and `benchmark` are the other two targets that touch the
+LLM/CLI and are excluded from `all` for the same reason.
 
 ## Benchmark
 
@@ -202,12 +209,16 @@ Volunteered here rather than left for someone else to find first.
   that produced no visible output and informed no decision — see
   `docs/methodology.md` §8 for the full account and the gate it led to).
   Held-out is reserved for a single, deliberate run at actual release time.
-- **`T2_UNRESOLVED` findings are real gaps, not confirmed absences.** 110 of
-  the 2,598 SIGNAL findings behind the headline number rest on pairs the
-  cascade escalated but never got an LLM verdict for — carried at reduced
-  confidence (0.5) rather than dropped, but also not confirmed. At the
-  cascade's tier-decision level (not the finding level — most tier decisions
-  never touch a primary outcome or become a finding at all), T2_UNRESOLVED
+- **`T2_UNRESOLVED`/`COLLAPSE_UNMATCHED` findings are real gaps, not
+  confirmed absences.** 143 of the 2,598 SIGNAL findings behind the headline
+  number rest on pairs the cascade never actually adjudicated: 110 escalated
+  to T3 but never got an LLM verdict (`resolved_by='T2_UNRESOLVED'`), and 33
+  are REPLACED collapses of two leftovers the cascade never even scored as a
+  candidate pair together (`resolved_by='COLLAPSE_UNMATCHED'`,
+  `pipeline.py`'s `tier_for`). Both are carried at reduced confidence (0.5)
+  rather than dropped, but neither is confirmed. At the cascade's
+  tier-decision level (not the finding level — most tier decisions never
+  touch a primary outcome or become a finding at all), T2_UNRESOLVED
   accounts for 1,628 of 13,153 decisions (12.4%) across the full corpus.
 - **No human inter-rater reliability (κ) study.** What the benchmark
   measures is agreement between this pipeline's automated findings and

@@ -65,13 +65,16 @@ class Finding:
 _MATCH_RELATIONS = {"SAME", "REWORDED", "NARROWED", "BROADENED", "TIMEPOINT_CHANGED"}
 
 # Tiers where the cascade explicitly could not adjudicate the pair -- T2_UNRESOLVED
-# ("didn't look": no T3 budget) and T3_FALLBACK ("looked and failed": CLI error/
-# timeout/malformed response). Findings resolved at either ride the same
+# ("didn't look": no T3 budget), T3_FALLBACK ("looked and failed": CLI error/
+# timeout/malformed response), and COLLAPSE_UNMATCHED (pipeline.py's tier_for:
+# a REPLACED/ADDED/REMOVED collapse of leftovers where the cascade never actually
+# scored *this* specific before/after pairing as a candidate -- see pipeline.py's
+# _cascade_matcher). Findings resolved at any of these ride the same
 # REPLACED/ADDED/REMOVED collapse as a confidently-resolved pair, so confidence is
 # the only signal distinguishing "the cascade confirmed this" from "the cascade
 # never actually adjudicated this" -- full 1.0 confidence on an unresolved match
 # would be indistinguishable from a real one downstream.
-_UNRESOLVED_TIERS = {"T2_UNRESOLVED", "T3_FALLBACK"}
+_UNRESOLVED_TIERS = {"T2_UNRESOLVED", "T3_FALLBACK", "COLLAPSE_UNMATCHED"}
 _UNRESOLVED_CONFIDENCE = 0.5
 
 

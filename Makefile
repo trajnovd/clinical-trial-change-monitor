@@ -60,8 +60,10 @@ test:
 show-history:
 	$(PY) scripts/show_history.py $(NCT)
 
-# Fresh-clone reproducibility check (docs/methodology.md "Reproducing the
-# headline number"): from an already-ingested cache, this reproduces the
-# headline number with no network access. Does NOT include adjudicate/
-# benchmark -- both call the LLM/CLI and are run separately, on purpose.
+# Reproducibility check (README.md "Reproducing the headline number"): from
+# an already-ingested cache, this reproduces the headline number with no
+# network access. NOT a fresh-clone check -- data/ is gitignored, so a fresh
+# clone has no cache yet and needs `make ingest` first (network) before this
+# reproduces anything. Does NOT include adjudicate/benchmark -- both call the
+# LLM/CLI and are run separately, on purpose.
 all: load pipeline headline
