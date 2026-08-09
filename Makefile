@@ -1,4 +1,4 @@
-.PHONY: venv ingest load pipeline headline adjudicate benchmark serve test all show-history
+.PHONY: venv ingest load pipeline headline adjudicate benchmark serve test all show-history monitor
 
 # All paths below are relative to this Makefile's own directory (make's default
 # recipe cwd) and never `cd` into an absolute path -- the repo lives under a
@@ -59,6 +59,16 @@ test:
 
 show-history:
 	$(PY) scripts/show_history.py $(NCT)
+
+# Cheap re-check of the already-ingested corpus for new registry versions
+# (~1 request/trial for the history list; only genuinely new snapshots get
+# fetched). Single pass, no daemon -- run it on a schedule instead, e.g. via
+# crontab (hourly, from the repo root, quoting the path for the space in the
+# directory name):
+#   0 * * * * cd "/path/to/Clincal Trial Change Monitor" && make monitor >> data/monitor_cron.log 2>&1
+# LIMIT bounds a corpus watch to the N most-recently-updated trials (unset = whole corpus).
+monitor:
+	$(PY) scripts/run_monitor.py --watch corpus --once $(if $(LIMIT),--limit $(LIMIT),)
 
 # Reproducibility check (README.md "Reproducing the headline number"): from
 # an already-ingested cache, this reproduces the headline number with no
