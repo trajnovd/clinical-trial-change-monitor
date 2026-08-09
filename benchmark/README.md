@@ -18,9 +18,10 @@ mapping decisions as implemented, the split protocol, and how to run it.
 ```
 
 Writes `benchmark/results_dev.md`. `--split heldout` is reserved for the
-single v1.0 gate run (TECH-PRD) -- it prints a loud warning banner and never
-writes a results file, so a stray invocation can't leak held-out numbers into
-the repo early.
+single v1.0 gate run (TECH-PRD) -- it prints a loud warning banner, never
+writes a results file, and refuses to run at all unless `CTCM_RELEASE_EVAL=1`
+is set (`CTCM_RELEASE_EVAL=1 .venv/bin/python benchmark/evaluate.py --split
+heldout`). See "Incident log" below for why that gate exists.
 
 ## What's being scored
 
@@ -53,13 +54,13 @@ Implemented in `benchmark/mapping.py`, unit-tested in `tests/test_benchmark.py`.
 |---|---|---|
 | `primary_from_secondary` | `SECONDARY_PROMOTED` | High |
 | `primary_to_secondary` | `PRIMARY_DEMOTED` | High |
-| `change_timing` | `TIMEPOINT_CHANGED` | High |
+| `change_timing`, alone in its phase | `TIMEPOINT_CHANGED` | High |
 | `new_primary` AND `primary_omitted` (same phase) | `PRIMARY_REPLACED` | Medium-high |
 | `new_primary` only | `PRIMARY_ADDED` | High |
 | `primary_omitted` only | `PRIMARY_REMOVED` | High |
 | `added_measurement` / `added_aggregation` / `added_timing` | `PRIMARY_NARROWED` | Medium |
 | `change_measurement` / `change_aggregation` | `PRIMARY_NARROWED` | **Low** -- see below |
-| `omitted_measurement` / `omitted_aggregation` / `omitted_timing` | *(unmapped)* | -- see below |
+| `omitted_measurement` / `omitted_aggregation` / `omitted_timing` | `PRIMARY_BROADENED` | Medium -- see below |
 | `no_change` (all sub-flags '0'/blank) | negative example | High |
 | `no_phase` | phase excluded from evaluation entirely | High |
 
@@ -78,8 +79,26 @@ default would shift a handful of labels across two low-volume categories.
 Not re-litigated mid-dev-iteration (task brief: iterate on mapping bugs, not
 model tuning) -- if it turns out to matter, it's one `if` branch to flip.
 
+**`change_timing` co-occurrence caveat, approximated at phase granularity:**
+DATA-NOTES SS6 qualifies the `change_timing` row: "`change_timing = 1` (and
+no add/omit/new/omitted **on the same primary**)". The CSV only carries
+phase-level flags, not per-primary ones -- there is no column that says
+*which* primary a given sub-flag refers to, so the literal per-primary check
+can't be implemented against this data. `mapping.py`'s `_axis1_codes`
+approximates it at phase granularity instead: `change_timing` only produces
+`TIMEPOINT_CHANGED` when no other axis-1-producing flag (`new_primary`,
+`primary_omitted`, `primary_from_secondary`, `primary_to_secondary`,
+`added_*`, `omitted_*`, `change_measurement`, `change_aggregation`) also
+fired in that same phase. This is a proxy, not the literal caveat -- it will
+also suppress a genuine, clean timing change that happens to share a phase
+with an unrelated change to a *different* primary, trading a little recall
+for not double-counting an ambiguous same-primary case as two independent
+findings. Low observed impact so far (4 ground-truth `TIMEPOINT_CHANGED`
+positives among 75 dev trials pre-fix); revisit if `TIMEPOINT_CHANGED`
+volume grows enough for the false-suppression rate to matter.
+
 **Axis 2 -- when it changed, and why it collapses two phases into one code:**
-`ctcm/classify.py`'s severity override (`classify()`, ~lines 209-211)
+`ctcm/classify.py`'s severity override (`classify()`, ~lines 225-227)
 unconditionally rewrites a finding's `change_type` to
 `POST_COMPLETION_CHANGE` for *any* primary change dated on/after
 `primary_completion_date`, regardless of what kind of change it is. That
@@ -94,24 +113,26 @@ a real detection miss. `change_a_i_` (recruitment phase) precedes
 completion by construction and is never overridden, so its Axis-1 identity
 is scored directly.
 
-For `POST_COMPLETION_CHANGE` specifically, an unmappable `omitted_*`
-broadening in `change_i_p_`/`change_p_l_` still counts as ground truth --
-our pipeline's PCD override fires on *any* detected primary-outcome text
-difference after completion, narrow or broad, so Holst confirming some
-change occurred there (even one we can't name) is still a real positive for
-that code.
+For `POST_COMPLETION_CHANGE` specifically, an `omitted_*` broadening in
+`change_i_p_`/`change_p_l_` still counts as ground truth -- our pipeline's
+PCD override fires on *any* detected primary-outcome text difference after
+completion, narrow or broad, so Holst confirming some change occurred there
+is still a real positive for that code, same as every other axis-1 category.
 
-**Unmapped (excluded from scoring):** `omitted_measurement` /
-`omitted_aggregation` / `omitted_timing` -- the mirror image of
-`PRIMARY_NARROWED` ("detail dropped, made less specific"). Our taxonomy has
-no "primary broadened" code. Per DATA-NOTES SS7.1 option (a): dropped from
-per-type scoring entirely rather than credited as a `PRIMARY_NARROWED` miss
-(counting a broadening as evidence our narrowing detector failed would
-misrepresent what the taxonomy covers). Trials whose *only* Holst signal in
-a phase is one of these three flags are also excluded from the
-false-positive-rate denominator: we can't honestly call a pipeline finding
-there a false positive (Holst did observe something) or a true negative
-(it's not "no change").
+**`PRIMARY_BROADENED` -- `omitted_measurement` / `omitted_aggregation` /
+`omitted_timing`:** the mirror image of `PRIMARY_NARROWED` ("detail dropped
+from an existing primary, made less specific"). DATA-NOTES SS7.1 (written
+before `PRIMARY_BROADENED` existed in ctcm's taxonomy) recommended dropping
+these three sub-flags from scoring entirely, since at the time our taxonomy
+had no "broadened" code. That's no longer true: `ctcm/classify.py`'s
+`_CODE_BY_KIND["BROADENED"] = "PRIMARY_BROADENED"` was added in the Task 7
+fix round (T2's qualifier rule mirrors NARROWED both directions -- e.g.
+"cardiovascular mortality" -> "all-cause mortality"), so these flags now map
+directly, the same shape as `added_* -> PRIMARY_NARROWED` above. Confidence
+Medium, not High, for the same reason `added_*` is Medium rather than High:
+the codebook's definition ("detail specified/dropped for the first time") is
+a good match for our "narrowed/broadened scope" definition in spirit, but
+the worked examples in each aren't identical in kind.
 
 **Not scored at all:**
 - `TIMELINE_REVISED` -- Holst never coded registry date-field edits, only
@@ -123,14 +144,23 @@ there a false positive (Holst did observe something) or a true negative
   separate Holst category to score `REWORDED` against; it's structurally
   equivalent to a Holst negative, not a distinct positive class.
 
-## Structural detector limitation surfaced by this benchmark
+## What the pipeline being scored actually is
 
-T0 (`ctcm.classify.t0_matcher`) only ever returns `"SAME"` or `None` -- it
-never returns `"NARROWED"`, so `PRIMARY_NARROWED` can **never** be predicted
-by the current pipeline. Every `PRIMARY_NARROWED` false negative in
-`results_dev.md` is expected at v0.2/v0.3-pending, not a mapping bug. Fixed
-by v0.3's fuzzy-matching tiers (embedding + cross-encoder), out of scope for
-this benchmark task.
+`evaluate.py` calls `ctcm.pipeline.run_pipeline()`, which runs the full
+**T0-T3 semantic cascade** (`ctcm/match.py`), not bare T0 exact-string
+matching -- `t0_matcher` (`ctcm/classify.py`) is legacy unit-test scaffolding
+only, unused by the pipeline since Task 7 (`ctcm/classify.py:132`'s own
+comment: "v0.2 passes t0_matcher"). An earlier version of this document
+claimed `PRIMARY_NARROWED` could never be predicted because `t0_matcher`
+never returns `"NARROWED"` -- that was true of the matcher named, but not of
+the pipeline actually invoked, and was flagged wrong in review
+(`v05-review.md` C1). T2 and T3 can and do produce `PRIMARY_NARROWED`.
+
+`results_dev.md`'s "Tier attribution" section reports the real, measured
+T0/T1/T2/T3 mix for whatever ran; its "Low-precision flags" section
+mechanically flags every change_type below a precision threshold on that
+run's own numbers (not a hand-picked one), so a stale claim like this one
+can't silently persist the same way again.
 
 ## Split protocol
 
@@ -141,18 +171,49 @@ computed **once** and persisted to `benchmark/splits/dev_ids.txt` /
 those files back verbatim -- the split cannot silently reshuffle even if the
 CSV is re-fetched and gains a row (`get_or_create_split` in `evaluate.py`,
 covered by `tests/test_benchmark.py`). Only `dev` may be iterated against;
-`heldout` is a single final run at v1.0.
+`heldout` is a single final run at v1.0, and `evaluate.py` refuses to run
+`--split heldout` at all unless `CTCM_RELEASE_EVAL=1` is set in the
+environment (`_require_release_eval_gate`, unit-tested) -- an explicit,
+deliberate opt-in required every time, not a default any invocation can fall
+into.
 
 ## Coverage
 
-Holst's 1,402 CT.gov trial IDs are being ingested into `data/cache` by a
-background process (`data/ingest_holst.log`) that started before this task
-and was still running partway through it. `evaluate.py` scores whatever
-subset of the labeled split is already in `data/cache` (via the shared
-`data/ctcm.db`, `load_corpus()` + `run_pipeline()`, both idempotent) and
-reports `evaluated / labeled` coverage explicitly in the results file. Below
-50% coverage, the report says so and flags itself as a checkpoint, not the
-final number -- re-run once ingestion finishes.
+Holst's 1,402 CT.gov trial IDs were ingested into `data/cache` by a
+background process (`data/ingest_holst.log`) that ran concurrently with most
+of this task and reported `1402/1402` done (with some per-trial 429/DNS
+failures along the way -- individual-trial fetch failures are caught and
+logged, they don't abort the batch or block a trial from simply not making
+it into `data/cache`). `evaluate.py` scores whatever subset of the labeled
+split is actually in `data/cache` (via the shared `data/ctcm.db`,
+`load_corpus()` + `run_pipeline()`, both idempotent) and reports `evaluated /
+labeled` coverage explicitly in the results file -- below 50% coverage, the
+report flags itself as a checkpoint rather than a final number. Re-run
+`evaluate.py --split dev` any time to refresh against however much of the
+corpus is currently cached.
+
+## Incident log
+
+**2026-08-08 -- a `--split heldout` run executed during dev-split
+development.** While verifying `evaluate.py`'s CLI behavior (specifically:
+does `--split heldout` correctly skip writing `results_dev.md`?), a real
+`--split heldout` invocation was run against the actual 559-trial labels --
+not a fixture, not a fake split. This is a violation of "nothing may iterate
+against held-out" in spirit even though the letter of the file-write
+constraint held: no results file was written (verified by hashing
+`results_dev.md` before/after and confirming no change), and its stdout was
+piped through `head -15` and never read by the person or process that ran
+it -- no held-out number was observed, recorded, transcribed, or used to
+inform any mapping/code decision in this benchmark. The stray process
+outlived the check that spawned it (several minutes, blocked on lock
+contention with another agent's concurrent pipeline run against the shared
+db) and was killed by the task coordinator during review before it produced
+any output that was seen. Net effect: no leakage occurred, but the
+invocation itself should never have happened. Remedy shipped in the same
+fix: `--split heldout` now hard-refuses to run without `CTCM_RELEASE_EVAL=1`
+explicitly set (see Split protocol above), so a curiosity-driven or
+smoke-test invocation can't execute the held-out join again without a
+deliberate, unmistakable opt-in.
 
 ## Known limitation: no inter-rater kappa
 

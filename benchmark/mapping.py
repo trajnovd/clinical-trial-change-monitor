@@ -18,11 +18,19 @@ from dataclasses import dataclass
 # no_change bucket explicitly excludes wording-only edits too, so it has no
 # separate mapped category to score against) and TIMELINE_REVISED (Holst never
 # coded registry date-field edits, only outcome-text changes -- DATA-NOTES SS7.2).
+#
+# PRIMARY_BROADENED (ctcm/classify.py _CODE_BY_KIND["BROADENED"]) is a v0.3
+# addition -- the T2 qualifier rule's mirror of NARROWED (e.g. "cardiovascular
+# mortality" -> "all-cause mortality"). It didn't exist when this benchmark's
+# mapping was first written, which is why omitted_measurement/aggregation/timing
+# used to be treated as unmappable; now they map directly, same as added_* ->
+# PRIMARY_NARROWED (see _axis1_codes below).
 CHANGE_TYPES = (
     "PRIMARY_REPLACED",
     "PRIMARY_DEMOTED",
     "SECONDARY_PROMOTED",
     "PRIMARY_NARROWED",
+    "PRIMARY_BROADENED",
     "TIMEPOINT_CHANGED",
     "POST_COMPLETION_CHANGE",
     "PRIMARY_ADDED",
@@ -30,28 +38,40 @@ CHANGE_TYPES = (
 )
 
 PHASE_PREFIXES = ("change_a_i_", "change_i_p_", "change_p_l_")
-# ctcm/classify.py's severity override (lines ~209-211) unconditionally rewrites
-# change_type to POST_COMPLETION_CHANGE for any primary change dated on/after
-# primary_completion_date, regardless of what kind of change it is -- so for
-# Holst's post-completion and post-publication phases, the axis-1 identity
+# ctcm/classify.py's severity override (classify(), ~lines 225-227) unconditionally
+# rewrites change_type to POST_COMPLETION_CHANGE for any primary change dated
+# on/after primary_completion_date, regardless of what kind of change it is -- so
+# for Holst's post-completion and post-publication phases, the axis-1 identity
 # (added/removed/replaced/...) is never separately joinable against our
 # findings; only the axis-2 tag is. Recruitment-stage (change_a_i_) changes are
 # pre-completion by construction, never overridden, so axis-1 identity survives.
 POST_COMPLETION_PREFIXES = ("change_i_p_", "change_p_l_")
 
-# The mirror image of PRIMARY_NARROWED ("detail dropped, made less specific") --
-# our taxonomy has no "primary broadened" code, so these three sub-flags can't
-# be mapped to any change_type. Dropped from scoring entirely per DATA-NOTES
-# SS7.1 option (a); tracked only via GroundTruth.has_unmapped_change so trials
-# where this is the *only* signal get excluded from the FPR denominator instead
-# of being silently miscounted as a true negative.
-UNMAPPABLE_SUFFIXES = ("omitted_measurement", "omitted_aggregation", "omitted_timing")
+# DATA-NOTES SS6's change_timing -> TIMEPOINT_CHANGED row is qualified "(and no
+# add/omit/new/omitted on the same primary)" -- the CSV only carries phase-level
+# flags, not per-primary ones, so "same primary" can't be checked directly. This
+# is the phase-level approximation: any of these firing in the SAME phase as
+# change_timing suppresses the plain timing read (see benchmark/README.md for
+# why this is a defensible proxy, not the literal caveat).
+_TIMING_COOCCURRENCE_SUFFIXES = (
+    "new_primary",
+    "primary_omitted",
+    "primary_from_secondary",
+    "primary_to_secondary",
+    "added_measurement",
+    "added_aggregation",
+    "added_timing",
+    "omitted_measurement",
+    "omitted_aggregation",
+    "omitted_timing",
+    "change_measurement",
+    "change_aggregation",
+)
 
 
 @dataclass(frozen=True)
 class GroundTruth:
     types: frozenset[str]
-    has_unmapped_change: bool
     no_change_confirmed: bool  # every applicable phase explicitly rated no_change
 
 
@@ -66,7 +86,9 @@ def _axis1_codes(row: dict, prefix: str) -> frozenset[str]:
         codes.add("SECONDARY_PROMOTED")
     if _flag(row, prefix, "primary_to_secondary"):
         codes.add("PRIMARY_DEMOTED")
-    if _flag(row, prefix, "change_timing"):
+    if _flag(row, prefix, "change_timing") and not any(
+        _flag(row, prefix, s) for s in _TIMING_COOCCURRENCE_SUFFIXES
+    ):
         codes.add("TIMEPOINT_CHANGED")
 
     new_primary = _flag(row, prefix, "new_primary")
@@ -87,6 +109,11 @@ def _axis1_codes(row: dict, prefix: str) -> frozenset[str]:
     # rather than PRIMARY_REPLACED (which implies the measure itself is gone).
     if any(_flag(row, prefix, s) for s in ("change_measurement", "change_aggregation")):
         codes.add("PRIMARY_NARROWED")
+    # Mirror of the added_* block above: detail *dropped* from an existing
+    # primary (made less specific) -> PRIMARY_BROADENED. Was unmappable before
+    # ctcm's v0.3 taxonomy gained this code (see CHANGE_TYPES comment).
+    if any(_flag(row, prefix, s) for s in ("omitted_measurement", "omitted_aggregation", "omitted_timing")):
+        codes.add("PRIMARY_BROADENED")
     return frozenset(codes)
 
 
@@ -98,14 +125,9 @@ def _phase_no_change(row: dict, prefix: str) -> bool:
     return row.get(prefix + "no_change") == "1"
 
 
-def _phase_has_unmapped(row: dict, prefix: str) -> bool:
-    return any(_flag(row, prefix, s) for s in UNMAPPABLE_SUFFIXES)
-
-
 def trial_ground_truth(row: dict) -> GroundTruth:
     """Map one labeled-subset CSV row to a GroundTruth. Pure function of the row dict."""
     types: set[str] = set()
-    has_unmapped = False
     any_applicable = False
     all_confirmed_no_change = True
 
@@ -115,16 +137,14 @@ def trial_ground_truth(row: dict) -> GroundTruth:
         any_applicable = True
 
         axis1 = _axis1_codes(row, prefix)
-        unmapped = _phase_has_unmapped(row, prefix)
-        has_unmapped = has_unmapped or unmapped
 
         if prefix in POST_COMPLETION_PREFIXES:
-            if axis1 or unmapped:
+            if axis1:
                 types.add("POST_COMPLETION_CHANGE")
         else:
             types |= axis1
 
-        if axis1 or unmapped:
+        if axis1:
             all_confirmed_no_change = False
         elif not _phase_no_change(row, prefix):
             # Applicable phase, nothing flagged, but no explicit no_change='1'
@@ -136,7 +156,6 @@ def trial_ground_truth(row: dict) -> GroundTruth:
 
     return GroundTruth(
         types=frozenset(types),
-        has_unmapped_change=has_unmapped,
         no_change_confirmed=any_applicable and all_confirmed_no_change,
     )
 
@@ -193,11 +212,8 @@ def score_by_type(
 
 def false_positive_rate(predicted: dict[str, frozenset[str]], truth: dict[str, GroundTruth]) -> tuple[int, int]:
     """(false positives, denominator) among evaluated trials where Holst confirmed
-    no change at all. Trials whose only Holst signal is an unmappable omitted_*
-    broadening are excluded from the denominator (DATA-NOTES SS7.1) -- we can't
-    honestly call our pipeline's finding there a false positive OR a true
-    negative when Holst did observe *something*, just not something our
-    taxonomy names."""
+    no change at all (GroundTruth.no_change_confirmed) -- every applicable phase
+    was explicitly rated no_change, with nothing mapped flagged in any of them."""
     evaluated = sorted(set(predicted) & set(truth))
     denom = [nct for nct in evaluated if truth[nct].no_change_confirmed]
     fp = sum(1 for nct in denom if predicted[nct])

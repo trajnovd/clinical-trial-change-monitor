@@ -6,6 +6,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 BENCH_DIR = Path(__file__).resolve().parent.parent / "benchmark"
 
 
@@ -64,6 +66,23 @@ def test_change_timing_is_timepoint_changed():
     assert gt.types == {"TIMEPOINT_CHANGED"}
 
 
+def test_change_timing_suppressed_by_cooccurring_change_same_phase():
+    """DATA-NOTES SS6 caveat: change_timing -> TIMEPOINT_CHANGED only "and no
+    add/omit/new/omitted on the same primary". The CSV has no per-primary
+    granularity (phase-level flags only), so this is approximated at the
+    phase level: any other axis-1-producing flag in the same phase suppresses
+    the plain timing read (see benchmark/README.md)."""
+    gt = mapping.trial_ground_truth(row(change_a_i_change_timing="1", change_a_i_new_primary="1"))
+    assert gt.types == {"PRIMARY_ADDED"}
+    assert "TIMEPOINT_CHANGED" not in gt.types
+
+
+def test_change_timing_in_different_phase_is_not_suppressed():
+    """The co-occurrence guard is per-phase, not trial-wide."""
+    gt = mapping.trial_ground_truth(row(change_a_i_change_timing="1", change_i_p_new_primary="1"))
+    assert gt.types == {"TIMEPOINT_CHANGED", "POST_COMPLETION_CHANGE"}
+
+
 def test_added_measurement_is_primary_narrowed():
     gt = mapping.trial_ground_truth(row(change_a_i_added_measurement="1"))
     assert gt.types == {"PRIMARY_NARROWED"}
@@ -78,11 +97,20 @@ def test_change_measurement_low_confidence_defaults_to_primary_narrowed():
     assert gt2.types == {"PRIMARY_NARROWED"}
 
 
-def test_omitted_measurement_is_unmapped_not_a_type():
+def test_omitted_measurement_is_primary_broadened():
+    """PRIMARY_BROADENED is a v0.3 ctcm addition (T2's mirror of NARROWED) --
+    omitted_measurement/aggregation/timing used to be unmappable, now they map
+    directly, same shape as added_* -> PRIMARY_NARROWED."""
     gt = mapping.trial_ground_truth(row(change_a_i_omitted_measurement="1"))
-    assert gt.types == frozenset()
-    assert gt.has_unmapped_change is True
-    assert gt.no_change_confirmed is False  # something *did* change, just unmappable
+    assert gt.types == {"PRIMARY_BROADENED"}
+    assert gt.no_change_confirmed is False
+
+
+def test_omitted_aggregation_and_timing_are_also_primary_broadened():
+    gt = mapping.trial_ground_truth(row(change_a_i_omitted_aggregation="1"))
+    assert gt.types == {"PRIMARY_BROADENED"}
+    gt2 = mapping.trial_ground_truth(row(change_a_i_omitted_timing="1"))
+    assert gt2.types == {"PRIMARY_BROADENED"}
 
 
 # --- Axis-2 (post-completion phases collapse to POST_COMPLETION_CHANGE) ---------------
@@ -98,13 +126,11 @@ def test_p_l_change_timing_maps_to_post_completion_change_not_timepoint_changed(
     assert gt.types == {"POST_COMPLETION_CHANGE"}
 
 
-def test_i_p_unmapped_only_still_flags_post_completion_change():
-    """Our pipeline's PCD override doesn't care about narrow-vs-broaden -- any
-    detected primary change after completion becomes POST_COMPLETION_CHANGE, so
-    even an unmappable omitted_* broadening in this phase should count."""
+def test_i_p_omitted_measurement_maps_to_post_completion_change_not_primary_broadened():
+    """Same axis-2 collapse rule applies to PRIMARY_BROADENED as every other
+    axis-1 code: post-completion phases only ever surface POST_COMPLETION_CHANGE."""
     gt = mapping.trial_ground_truth(row(change_i_p_omitted_measurement="1"))
     assert gt.types == {"POST_COMPLETION_CHANGE"}
-    assert gt.has_unmapped_change is True
 
 
 def test_recruitment_and_post_completion_changes_both_present():
@@ -155,10 +181,10 @@ def test_score_by_type_counts_tp_fp_fn():
         "NCT4": frozenset(),  # TN
     }
     truth = {
-        "NCT1": mapping.GroundTruth(types=frozenset({"PRIMARY_ADDED"}), has_unmapped_change=False, no_change_confirmed=False),
-        "NCT2": mapping.GroundTruth(types=frozenset(), has_unmapped_change=False, no_change_confirmed=True),
-        "NCT3": mapping.GroundTruth(types=frozenset({"PRIMARY_ADDED"}), has_unmapped_change=False, no_change_confirmed=False),
-        "NCT4": mapping.GroundTruth(types=frozenset(), has_unmapped_change=False, no_change_confirmed=True),
+        "NCT1": mapping.GroundTruth(types=frozenset({"PRIMARY_ADDED"}), no_change_confirmed=False),
+        "NCT2": mapping.GroundTruth(types=frozenset(), no_change_confirmed=True),
+        "NCT3": mapping.GroundTruth(types=frozenset({"PRIMARY_ADDED"}), no_change_confirmed=False),
+        "NCT4": mapping.GroundTruth(types=frozenset(), no_change_confirmed=True),
     }
     scores = mapping.score_by_type(predicted, truth, change_types=("PRIMARY_ADDED",))
     s = scores["PRIMARY_ADDED"]
@@ -170,7 +196,7 @@ def test_score_by_type_counts_tp_fp_fn():
 
 def test_score_by_type_only_counts_trials_present_in_both_dicts():
     predicted = {"NCT1": frozenset({"PRIMARY_ADDED"}), "NCT_UNCACHED": frozenset({"PRIMARY_ADDED"})}
-    truth = {"NCT1": mapping.GroundTruth(frozenset({"PRIMARY_ADDED"}), False, False), "NCT2": mapping.GroundTruth(frozenset(), False, True)}
+    truth = {"NCT1": mapping.GroundTruth(frozenset({"PRIMARY_ADDED"}), False), "NCT2": mapping.GroundTruth(frozenset(), True)}
     scores = mapping.score_by_type(predicted, truth, change_types=("PRIMARY_ADDED",))
     # NCT_UNCACHED has no label, NCT2 has no prediction entry (not evaluated) -> only NCT1 counted
     assert (scores["PRIMARY_ADDED"].tp, scores["PRIMARY_ADDED"].fp, scores["PRIMARY_ADDED"].fn) == (1, 0, 0)
@@ -178,23 +204,23 @@ def test_score_by_type_only_counts_trials_present_in_both_dicts():
 
 def test_precision_and_recall_undefined_when_denominator_zero():
     predicted = {"NCT1": frozenset()}
-    truth = {"NCT1": mapping.GroundTruth(frozenset(), False, True)}
+    truth = {"NCT1": mapping.GroundTruth(frozenset(), True)}
     s = mapping.score_by_type(predicted, truth, change_types=("PRIMARY_ADDED",))["PRIMARY_ADDED"]
     assert s.precision is None
     assert s.recall is None
     assert s.f1 is None
 
 
-def test_false_positive_rate_excludes_unmapped_only_trials():
+def test_false_positive_rate_denominator_is_confirmed_no_change_trials_only():
     predicted = {
         "NCT1": frozenset({"PRIMARY_ADDED"}),  # FP: confirmed no-change, but we flagged something
-        "NCT2": frozenset({"PRIMARY_ADDED"}),  # excluded: only unmapped signal, not a confirmed negative
+        "NCT2": frozenset({"PRIMARY_ADDED"}),  # excluded: not a confirmed negative (some Holst signal)
         "NCT3": frozenset(),  # true negative
     }
     truth = {
-        "NCT1": mapping.GroundTruth(frozenset(), False, no_change_confirmed=True),
-        "NCT2": mapping.GroundTruth(frozenset(), True, no_change_confirmed=False),
-        "NCT3": mapping.GroundTruth(frozenset(), False, no_change_confirmed=True),
+        "NCT1": mapping.GroundTruth(frozenset(), no_change_confirmed=True),
+        "NCT2": mapping.GroundTruth(frozenset({"PRIMARY_BROADENED"}), no_change_confirmed=False),
+        "NCT3": mapping.GroundTruth(frozenset(), no_change_confirmed=True),
     }
     fp, denom = mapping.false_positive_rate(predicted, truth)
     assert (fp, denom) == (1, 2)  # NCT1 + NCT3 in denom, only NCT1 flagged
@@ -217,6 +243,58 @@ def test_split_is_deterministic_and_covers_all_ids_without_overlap(tmp_path, mon
     dev2, heldout2 = evaluate.get_or_create_split(list(reversed(ids)))
     assert dev1 == dev2
     assert heldout1 == heldout2
+
+
+# --- evaluate.py --split heldout release-eval gate (v05-review.md C2) -----------------
+
+
+def test_heldout_refused_without_release_eval_env(monkeypatch):
+    monkeypatch.delenv("CTCM_RELEASE_EVAL", raising=False)
+    with pytest.raises(SystemExit):
+        evaluate._require_release_eval_gate("heldout")
+
+
+def test_heldout_allowed_with_release_eval_env(monkeypatch):
+    monkeypatch.setenv("CTCM_RELEASE_EVAL", "1")
+    evaluate._require_release_eval_gate("heldout")  # must not raise
+
+
+def test_dev_split_never_gated(monkeypatch):
+    monkeypatch.delenv("CTCM_RELEASE_EVAL", raising=False)
+    evaluate._require_release_eval_gate("dev")  # must not raise regardless of env
+
+
+# --- evaluate.py read_pipeline_snapshot: one connection, one consistent read ------------
+# (v05-review.md C1 -- previously three separate connections could each observe a
+# different commit of the shared, concurrently-written data/ctcm.db.)
+
+
+def test_read_pipeline_snapshot_is_internally_consistent(tmp_path, monkeypatch):
+    from ctcm import config, db as ctcm_db
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "test.db")
+
+    conn = ctcm_db.connect()
+    conn.execute("INSERT INTO trials(nct_id) VALUES ('NCT1'), ('NCT2')")
+    conn.execute(
+        "INSERT INTO findings(nct_id, from_version, to_version, change_type, severity, confidence, "
+        "resolved_by, rationale) VALUES ('NCT1', 0, 1, 'PRIMARY_ADDED', 'SIGNAL', 1.0, 'T2', 'r')"
+    )
+    conn.execute(
+        "INSERT INTO findings(nct_id, from_version, to_version, change_type, severity, confidence, "
+        "resolved_by, rationale) VALUES ('NCT1', 0, 1, 'REWORDED', 'CONTEXT', 1.0, 'T0', 'r')"
+    )
+    conn.commit()
+    conn.close()
+
+    have_cache, predicted, tiers = evaluate.read_pipeline_snapshot({"NCT1", "NCT2", "NCT_NOT_CACHED"})
+
+    assert have_cache == {"NCT1", "NCT2"}  # NCT_NOT_CACHED has no row in trials -> not evaluated
+    assert predicted["NCT1"] == frozenset({"PRIMARY_ADDED"})  # REWORDED excluded (not in CHANGE_TYPES)
+    assert predicted["NCT2"] == frozenset()  # cached, zero findings -> still counted as evaluated
+    assert tiers == {"T2": 1, "T0": 1}  # tier count covers ALL findings, not just scored types
 
 
 def test_split_written_to_disk_is_frozen_even_if_label_set_changes(tmp_path, monkeypatch):

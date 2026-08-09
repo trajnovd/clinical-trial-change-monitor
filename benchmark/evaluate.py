@@ -7,16 +7,19 @@ Run from repo root:
     .venv/bin/python benchmark/evaluate.py --split dev
 
 Writes benchmark/results_dev.md. --split heldout is for the single v1.0 run
-only (TECH-PRD gate) -- it prints a warning banner and never writes a results
-file, so a stray run can't leak held-out numbers into the repo early.
+only (TECH-PRD gate) -- it prints a warning banner, never writes a results
+file, and refuses to run at all unless CTCM_RELEASE_EVAL=1 is set (see
+benchmark/README.md's incident log for why the env-var gate exists).
 """
 
 import argparse
 import csv
+import os
 import random
 import sqlite3
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -92,47 +95,43 @@ def run_ctcm_pipeline() -> None:
     _retry_on_lock(run_pipeline)
 
 
-def cached_ids(nct_ids: set[str]) -> set[str]:
-    """Which of nct_ids made it into the trials table, i.e. have >=1 extracted
-    version -- the real proxy for 'ingested and pipeline-ready', not just a
-    cache directory existing."""
+def read_pipeline_snapshot(nct_ids: set[str]) -> tuple[set[str], dict[str, frozenset[str]], dict[str, int]]:
+    """Which of nct_ids are cache-extracted, their predicted change_types, and
+    tier attribution (findings.resolved_by) -- read from ONE connection inside
+    ONE explicit read transaction, so all three numbers describe the same
+    instant of a shared data/ctcm.db that other agents write to concurrently.
+
+    v05-review.md C1: three separate connections (as this used to be) can each
+    land on a different commit mid-run -- e.g. `have_cache` computed before a
+    concurrent run_pipeline() write lands, then `predicted`/`tiers` computed
+    after -- producing a self-contradictory report (a "T0: 100%" tier table
+    next to findings that could only have come from a non-T0 tier). SQLite's
+    default Python binding doesn't start a transaction for SELECTs, so without
+    an explicit BEGIN each statement gets its own fresh read snapshot even on
+    one connection; wrapping the reads in one transaction pins a single
+    snapshot for all of them."""
     conn = db.connect()
-    have = {r["nct_id"] for r in conn.execute("SELECT DISTINCT nct_id FROM trials")}
-    conn.close()
-    return nct_ids & have
+    conn.execute("BEGIN")
+    try:
+        have = {r["nct_id"] for r in conn.execute("SELECT DISTINCT nct_id FROM trials")}
+        have_cache = nct_ids & have
 
-
-def predicted_types_by_trial(nct_ids: set[str]) -> dict[str, frozenset[str]]:
-    """Distinct scored change_type values per trial from findings, restricted to
-    nct_ids (the evaluated set) and to CHANGE_TYPES (excludes REWORDED/
-    TIMELINE_REVISED, which have no Holst ground truth -- see mapping.py)."""
-    if not nct_ids:
-        return {}
-    conn = db.connect()
-    placeholders = ",".join("?" * len(CHANGE_TYPES))
-    rows = conn.execute(
-        f"SELECT DISTINCT nct_id, change_type FROM findings WHERE change_type IN ({placeholders})",
-        CHANGE_TYPES,
-    ).fetchall()
-    conn.close()
-    by_trial: dict[str, set[str]] = {nct: set() for nct in nct_ids}
-    for r in rows:
-        if r["nct_id"] in by_trial:
-            by_trial[r["nct_id"]].add(r["change_type"])
-    return {k: frozenset(v) for k, v in by_trial.items()}
-
-
-def resolved_by_counts(nct_ids: set[str]) -> dict[str, int]:
-    if not nct_ids:
-        return {}
-    conn = db.connect()
-    placeholders = ",".join("?" * len(nct_ids))
-    rows = conn.execute(
-        f"SELECT resolved_by, COUNT(*) c FROM findings WHERE nct_id IN ({placeholders}) GROUP BY resolved_by",
-        tuple(nct_ids),
-    ).fetchall()
-    conn.close()
-    return {r["resolved_by"]: r["c"] for r in rows}
+        predicted: dict[str, set[str]] = {nct: set() for nct in have_cache}
+        tiers: Counter[str] = Counter()
+        if have_cache:
+            placeholders = ",".join("?" * len(have_cache))
+            rows = conn.execute(
+                f"SELECT nct_id, change_type, resolved_by FROM findings WHERE nct_id IN ({placeholders})",
+                tuple(have_cache),
+            ).fetchall()
+            for r in rows:
+                tiers[r["resolved_by"]] += 1
+                if r["change_type"] in CHANGE_TYPES:
+                    predicted[r["nct_id"]].add(r["change_type"])
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+    return have_cache, {k: frozenset(v) for k, v in predicted.items()}, dict(tiers)
 
 
 def _fmt(x: float | None) -> str:
@@ -172,6 +171,37 @@ def render_report(
         lines.append(f"| {ct} | {s.tp} | {s.fp} | {s.fn} | {s.tn} | {_fmt(s.precision)} | {_fmt(s.recall)} | {_fmt(s.f1)} |")
     lines.append("")
 
+    # Flagged mechanically from this run's own numbers (not hardcoded to a
+    # specific code) so this section can't go stale the way a hand-picked
+    # claim did before (v05-review.md C1/I2) -- every code below this
+    # threshold gets equal prominence, whatever the cause turns out to be.
+    LOW_PRECISION_THRESHOLD = 0.3
+    MIN_PREDICTED_POSITIVES = 3
+    low_precision = [
+        ct
+        for ct in CHANGE_TYPES
+        if scores[ct].precision is not None
+        and scores[ct].precision < LOW_PRECISION_THRESHOLD
+        and (scores[ct].tp + scores[ct].fp) >= MIN_PREDICTED_POSITIVES
+    ]
+    lines += [
+        f"## Low-precision flags (< {LOW_PRECISION_THRESHOLD:.0%}, n >= {MIN_PREDICTED_POSITIVES} predicted-positive trials)",
+        "",
+    ]
+    if low_precision:
+        for ct in low_precision:
+            s = scores[ct]
+            lines.append(f"- **{ct}**: precision {_fmt(s.precision)} ({s.tp} TP / {s.fp} FP).")
+        lines.append(
+            "Root cause not diagnosed here -- could be a real weakness at whichever tier is "
+            "resolving these pairs (see tier attribution below), a mapping edge case, or "
+            "small-sample noise at this coverage level. Not safe to treat as reliable without "
+            "further investigation; flagged uniformly, not singled out."
+        )
+    else:
+        lines.append("No change_type crosses this threshold on this sample.")
+    lines.append("")
+
     fpr = fp / fp_denom if fp_denom else None
     lines += [
         "## Overall false-positive rate",
@@ -197,27 +227,43 @@ def render_report(
         "for this machine-only benchmark.",
         "- TIMELINE_REVISED and REWORDED have no Holst ground truth and are excluded from "
         "scoring entirely (see benchmark/README.md).",
-        "- omitted_measurement/omitted_aggregation/omitted_timing (Holst's 'broadened' "
-        "sub-flags) have no corresponding change_type in our taxonomy and are excluded from "
-        "per-type scoring; trials whose only Holst signal is one of these are also excluded "
-        "from the false-positive-rate denominator (can't call our finding there a clean FP "
-        "or TN when Holst did observe *something*).",
         "- change_measurement/change_aggregation map to PRIMARY_NARROWED at low confidence "
         "(documented in benchmark/README.md) -- Holst's own severity coding treats them as "
         "categorically milder than the swap/demote/promote group.",
-        "- PRIMARY_NARROWED recall is structurally 0 at T0: `t0_matcher` (ctcm/classify.py) "
-        "only ever returns SAME or None, never NARROWED, so this code cannot be predicted at "
-        "all until v0.3's fuzzy-matching tiers land -- every PRIMARY_NARROWED FN below is "
-        "expected, not a bug.",
+        "- change_timing -> TIMEPOINT_CHANGED is suppressed when another axis-1-producing "
+        "flag fires in the same phase, approximating DATA-NOTES' per-primary co-occurrence "
+        "caveat at phase granularity (the CSV has no per-primary flags) -- see "
+        "benchmark/README.md.",
+        "- Findings below come from the full T0-T3 semantic cascade (`ctcm/pipeline.py` -> "
+        "`ctcm/match.py`), not just exact-string T0 matching -- see tier attribution above "
+        "for the actual mix on this sample.",
         "",
     ]
     return "\n".join(lines)
+
+
+def _require_release_eval_gate(split: str) -> None:
+    """Hard stop for --split heldout: "nothing may iterate against held-out"
+    is about the *practice*, not just the results file -- a smoke-test run
+    against real held-out labels happened once during Task 9 development even
+    though it wrote no file (see the incident log in benchmark/README.md).
+    Requires an explicit opt-in env var so a casual/curious invocation can't
+    execute the held-out join again by accident; the single v1.0 gate run is
+    expected to set this deliberately, not have it on by default."""
+    if split == "heldout" and os.environ.get("CTCM_RELEASE_EVAL") != "1":
+        raise SystemExit(
+            "refusing --split heldout: set CTCM_RELEASE_EVAL=1 to run the single v1.0 gate "
+            "evaluation. Nothing may iterate against held-out labels outside that one run -- "
+            "see benchmark/README.md."
+        )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--split", choices=["dev", "heldout"], default="dev")
     args = parser.parse_args()
+
+    _require_release_eval_gate(args.split)
 
     if args.split == "heldout":
         banner = "!" * 78
@@ -233,11 +279,9 @@ def main() -> None:
 
     run_ctcm_pipeline()
 
-    have_cache = cached_ids(set(split_ids))
-    predicted = predicted_types_by_trial(have_cache)
+    have_cache, predicted, tiers = read_pipeline_snapshot(set(split_ids))
     scores = score_by_type(predicted, truth, change_types=CHANGE_TYPES)
     fp, fp_denom = false_positive_rate(predicted, truth)
-    tiers = resolved_by_counts(have_cache)
 
     report = render_report(args.split, split_ids, have_cache, scores, fp, fp_denom, tiers)
     print(report)
