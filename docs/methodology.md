@@ -403,3 +403,154 @@ that are authorised but not yet actively recruiting.
 every `nct_id` in `trials` regardless of registry — picks up CTIS trials
 exactly like CT.gov ones the next time `make pipeline` runs. No CTIS-specific
 branch exists anywhere in the diff/classify/severity code.
+
+## 12. Publication linking (`ctcm/publink.py`)
+
+**What it links, and how.** For each selected trial, three queries run
+against two APIs and merge into one row per PMID, highest tier wins
+(`assign_tiers`, line 99):
+
+- **HIGH** — PubMed eutils `esearch` with `term={nct}[si]`: the NCT ID as a
+  publisher-asserted secondary-source ID (ICMJE trial-registration
+  metadata) — curated linkage, not text-mined (`_pubmed_si`, line 199).
+- **MEDIUM** — Europe PMC `ABSTRACT:"{nct}"`: the NCT ID appears in the
+  paper's own abstract. A paper rarely cites another trial's ID there, so
+  this is a reasonable "this paper is substantially about the trial" signal.
+- **LOW** — Europe PMC bare `"{nct}"` free-text: catches every indexed
+  mention (comparator citations, reviews, reference lists) —
+  **10-40x noisier than the two tiers above**, per the v2 research verifying
+  these three query forms live (2026-08-09, module docstring). Capped at
+  `LOW_TIER_PAGE_SIZE=100` results (line 43) — a deliberate cap on the noisy
+  query, not full recall (one trial alone hit 371 matches). LOW is never
+  presented as "the trial's paper," only as "mentions this trial."
+
+A PMID that's `[si]`-linked but never surfaced in either Europe PMC query
+still gets a HIGH-tier stub row (pmid only, no title/journal/date) — the
+linkage itself is the evidence; metadata is best-effort.
+
+**The truncation trap eutils doesn't warn about.** `esearch` defaults to
+`retmax=20` with no warning in the response when the true count is larger —
+silently truncating the *curated* HIGH tier would be worse than truncating
+the deliberately-capped LOW tier. `SI_RETMAX=500` (line 54) is set
+explicitly, and if the real `count` still exceeds what came back,
+`_pubmed_si` refetches once with `retmax=count` (lines 209-210) rather than
+quietly dropping the rest — verified live: `NCT00000620` has 109 `[si]`-linked
+papers, only 20 came back with no `retmax` set at all.
+
+**Never parses paper content.** Only link + tier + evidence source are
+stored (`publications(nct_id, pmid, doi, title, journal, pub_date, oa, tier,
+source)`) — the PRD explicitly defers full-text parsing. `days_after_change`
+(line 142) computes whole days between a publication and a SIGNAL finding's
+change date only when the publication postdates the change (never a
+"published before" framing), and leaves the result `None` rather than
+fabricate a day-precision date from Europe PMC's coarser pub-year fields.
+
+**Trial selection.** `select_nct_ids` (line 239) prioritizes trials with an
+adjudicated SIGNAL finding first, then any SIGNAL trial, then everything
+else alphabetically — the case-study population gets linked first under
+`--limit`.
+
+## 13. Continuous monitoring (`ctcm/monitor.py`)
+
+**What a pass does, per trial.** Refetch the version-history *list* only
+(~1 request via `RegistryAdapter.list_versions` — cheap), compare its length
+to `trials.version_count`. A trial whose history grew gets its new versions
+fetched under the same fetch rule as ingest (v0, outcome-touching, final)
+into the existing `data/cache/{nct}/` layout; `load_corpus()` and
+`run_pipeline()` then re-run scoped to just the changed trials
+(`check_updates`, line 314).
+
+**Atomic write ordering closes a real data-loss path.**
+`_fetch_new_snapshots` (line 217) fetches every wanted-but-uncached snapshot
+first, and only refreshes `history.json` — atomically, via temp-file +
+`Path.replace` — once *all* of them are confirmed on disk. If a fetch fails
+partway, the exception propagates before `history.json` is touched: the old
+(smaller) version count is left in place, so the next pass sees the same
+known count and retries the missing version, rather than a
+partially-fetched trial silently losing that version forever.
+
+**New-finding detection is a multiset diff, not a set diff.**
+`run_pipeline()` does delete+reinsert per scoped trial, so a changed trial's
+findings get fresh `finding_id`s and `NULL` `first_seen_at` on every call.
+`check_updates` snapshots each changed trial's pre-existing findings by
+content hash (`_findings_multiset`, line 249) as a **list** of prior
+`first_seen_at` values per hash, not a set — two findings can legitimately
+share an identical content hash within one trial (duplicate/near-duplicate
+outcome text is real registry data), and a set would collapse them, letting
+one silently inherit the other's `first_seen_at`. `_reconcile_trial` (line
+279) consumes each hash's queue in order as matching post-rerun rows are
+seen; once a queue is empty, further rows with that hash are the surplus —
+genuinely new — stamped with `now()` and appended to
+`data/monitor_log.jsonl`.
+
+**`t3_limit=0`, not `t3_enabled=False`.** The rerun uses
+`run_pipeline(t3_enabled=True, t3_limit=0, ...)` (line 390) so that
+`ctcm.match.T3Client`'s cache lookup still runs before its budget check — an
+unchanged candidate pair replays to the same cached tier decision every
+time. `t3_enabled=False` would skip `T3Client` (and its cache) entirely,
+flipping every previously LLM-resolved pair on a changed trial to
+`T2_UNRESOLVED` and minting spurious "new" content hashes on every single
+pass, even with nothing genuinely new in the registry.
+
+**Registry-routed, not CT.gov-only.** `check_updates` reads each trial's
+`trials.registry` column and splits ids into `ctgov_ids`/`ctis_ids` *before*
+any network call (line 338): `ctgov_ids` go through `CTGovAdapter`, which
+serializes requests behind a `MIN_INTERVAL=0.4`s floor between dispatches
+(line 126) — CT.gov's history endpoint was verified live to start 429ing
+under any overlapping concurrency (a measured guess, not a published limit;
+`# ponytail:` at the class docstring flags the global lock as the ceiling,
+tune `MIN_INTERVAL` or swap in a real token bucket if a production run still
+429s). `ctis_ids` go once, batched, to `ctcm.ctis.snapshot_pass()` rather
+than through `CTISAdapter` — `CTISAdapter` is a pure local reader (§11), so
+routing through it here would just re-read what's already on disk and never
+detect a real external change; `snapshot_pass()` batched once also preserves
+CTIS's own internal serialized-request pacing, which per-trial concurrent
+calls would defeat.
+
+**Limitation: prospective, like CTIS.** A trial's history before the pass
+that first checks it is untouched — monitoring finds new versions going
+forward, it does not backfill anything `make ingest` missed.
+
+## 14. Sponsor/class/phase/year/condition analytics (`ctcm/analytics.py`, `/api/analytics`)
+
+**"Signal" is exactly the headline definition, reused.** A trial counts
+once it has ≥1 finding with `severity='SIGNAL'` — already "post-enrolment
+primary change" by construction (`classify.py` only assigns `SIGNAL` to a
+primary-outcome change on or after enrolment; §6), so no extra day-count
+filter is needed here (module docstring, lines 9-14).
+
+**Denominator honesty rules.**
+- Every rate row carries its numerator (`signalTrials`) and denominator
+  (`totalTrials`) alongside the rate — never a bare percentage (`_rate_row`,
+  line 79).
+- `signal_rate_by_sponsor` enforces a hard floor, `MIN_SPONSOR_TRIALS=5`
+  (line 38, used at line 123): below that, one or two trials would swing a
+  sponsor between 0% and 100%, reading as signal it isn't — those sponsors
+  are dropped from the table entirely, not just flagged.
+- `bySponsorClass`/`byPhase`/`byYear`/`topConditions` have **no hard
+  floor** (dropping a real category like a rare sponsor class or an early
+  year would hide data, not protect it), but every row still carries
+  `lowN: total < 5` so a reader can see when a rate rests on a handful of
+  trials, without the table silently omitting it.
+
+**`ctgov`-only, with the exclusion disclosed, not silent.** EU CTIS trials
+(`trials.registry='ctis'`) all have `version_count=1` — structurally
+incapable of a finding, since a finding needs a diffed version pair. Folding
+them into these tables wouldn't add real 0%-rate signal; it would dilute
+every denominator with trials that were never eligible to contribute a
+numerator, and would falsify the shared `RESULTS_POSTED_CAVEAT`
+(`ctcm/api.py:43`), which describes ctgov's completed/results-posted corpus
+specifically. `_ctgov_only()` (line 64) excludes CTIS rows from every
+`trials`-table aggregate; `excluded_ctis_count()` (line 70) reports how
+many, surfaced by `/api/analytics` as `ctisExcludedCount` so the exclusion
+is disclosed rather than invisible. `timing_histogram`/
+`adjudication_concern_mix` need no such filter — both are keyed off
+`findings`/`adjudications`, which (same `version_count=1` constraint) can
+never contain a CTIS row in the first place.
+
+**Limitation: sponsor names are grouped as the registry wrote them.**
+`lead_sponsor` (`ctcm/extract.py:111`) is stored verbatim from
+`leadSponsor.name`, with no canonicalization pass — the same sponsor
+registered under two spellings (e.g. a name change, a punctuation variant)
+splits into two rows here rather than one, each with its own (smaller, and
+therefore more likely `lowN`) denominator.

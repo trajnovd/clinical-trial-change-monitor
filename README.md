@@ -237,15 +237,58 @@ Volunteered here rather than left for someone else to find first.
   gold standard, not a second independent human rating. A κ study needs
   human coders and is out of scope here.
 
+## v2 features
+
+Four v2 additions beyond the v1.0 CT.gov-diffing core (EU CTIS is covered in
+"Documented limitations" above; the other three below).
+
+- **Publication linking** (`ctcm/publink.py`) — links each trial's NCT ID to
+  papers that mention it, tiered by evidence strength: `HIGH` = PubMed's
+  curated `[si]` (secondary-source-ID) linkage, `MEDIUM` = the NCT ID appears
+  in a paper's Europe PMC abstract, `LOW` = the NCT ID appears anywhere in
+  Europe PMC's full-text index. Run: `.venv/bin/python scripts/run_publink.py
+  --limit 50` (SIGNAL trials linked first). Shown on each trial's page under
+  "Published reports" (`make serve`). **Caveat: links only, never parses** —
+  a LOW-tier link means "this paper mentions the trial somewhere" (a
+  citation, a comparator arm), not "this paper reports the trial's results,"
+  and LOW-tier hits run 10-40x noisier than HIGH/MEDIUM (`docs/methodology.md`
+  §12).
+
+- **Continuous monitoring** (`ctcm/monitor.py`) — a single cheap re-check
+  pass over an already-ingested corpus: refetch each trial's version-history
+  list (~1 request/trial), fetch only the genuinely new snapshots, and
+  re-run the pipeline scoped to just the trials that grew. New findings are
+  stamped `first_seen_at` and appended to `data/monitor_log.jsonl`. Run:
+  `make monitor` (single pass, no daemon — cron line in the Makefile).
+  **Caveat: prospective, not retroactive** — covers both CT.gov and EU CTIS
+  trials (routed by each trial's `registry` column), but only ever detects
+  changes from the first monitor pass forward; it complements `make ingest`,
+  it doesn't replace it (`docs/methodology.md` §13).
+
+- **Sponsor/class/phase/year/condition analytics**
+  (`ctcm/analytics.py`, `/api/analytics`) — SIGNAL rates (post-enrolment
+  primary-outcome change) grouped by sponsor (≥5-trial floor), sponsor
+  class, phase, year, and condition, every row carrying its numerator and
+  denominator (never a bare percentage) plus a `lowN` marker on any group
+  under 5 trials. View: `make serve` then open `#/analytics`. **Caveat:
+  ctgov-only** — EU CTIS trials are structurally excluded (prospective-only,
+  can never yet have a diffable version pair); the excluded count is
+  reported (`ctisExcludedCount`) rather than silently dropped, and every
+  rate describes the same results-posted ctgov corpus as the headline number
+  above (`docs/methodology.md` §14).
+
 ## Repository map
 
 - `ctcm/` — the library: `ingest.py`, `extract.py`, `normalize.py`,
   `match.py` (cascade), `timeline.py` (anchoring), `classify.py` (taxonomy),
   `pipeline.py` (orchestration), `adjudicate.py`, `api.py`, `db.py`,
   `ctis.py` (v2, EU CTIS adapter — prospective only, see "Documented
-  limitations" and `docs/methodology.md` §11).
+  limitations" and `docs/methodology.md` §11), `publink.py` (v2, publication
+  linking, §12), `monitor.py` (v2, continuous monitoring, §13),
+  `analytics.py` (v2, sponsor/class/phase/year/condition rates, §14).
 - `scripts/` — CLI entry points (`run_ingest.py`, `run_pipeline.py`,
-  `run_adjudicate.py`, `headline.py`, `show_history.py`, `run_ctis.py`).
+  `run_adjudicate.py`, `headline.py`, `show_history.py`, `run_ctis.py`,
+  `run_publink.py`, `run_monitor.py`).
 - `benchmark/` — Holst ground-truth mapping, split protocol, and results.
 - `ui/index.html` — the timeline scrubber (single file, no build step).
 - `docs/methodology.md` — full detection methodology, deviations, upgrade paths.
