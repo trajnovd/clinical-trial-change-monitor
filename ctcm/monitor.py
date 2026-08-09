@@ -8,33 +8,45 @@ from the same history "changes" list -- NOT `SELECT COUNT(*) FROM versions`,
 which only counts the subset of versions we actually cache under the fetch
 rule below, not every registry revision). Trials with a longer history get
 their new versions fetched into the existing data/cache/{nct}/ layout (same
-fetch rule as ctcm.ingest.fetch_trial: v0 + outcome-touching + final), then
-ctcm.extract.load_corpus() and ctcm.pipeline.run_pipeline() re-run.
+fetch rule as ctcm.ingest.fetch_trial: v0 + outcome-touching + final); only
+once every wanted snapshot for a trial is confirmed cached on disk does
+history.json get refreshed, atomically (see _fetch_new_snapshots) -- a
+mid-trial fetch failure leaves the old history.json untouched, so the next
+pass sees the same version_count and retries instead of silently losing the
+missing version forever (task14-review.md Critical #1).
 
-load_corpus()/run_pipeline() aren't scoped to "just the changed trials" --
-they're plain, unmodified, idempotent full-corpus passes (out of scope for
-this task to make nct-filterable; see task14-report.md). run_pipeline() does
-a delete+reinsert per trial, so EVERY trial's findings get a fresh finding_id
-and a NULL first_seen_at on every call, not just the changed ones. To keep
-first_seen_at meaningful, check_updates() snapshots every trial's findings by
+ctcm.extract.load_corpus() and ctcm.pipeline.run_pipeline() then re-run
+scoped to just this pass's changed trials (both take an optional nct_ids
+filter added for this: default None keeps every other caller's original
+whole-corpus behaviour unchanged). Scoping also shrinks Critical #1's blast
+radius to nothing: an nct whose fetch failed is never in `changed`, so it's
+never touched here regardless.
+
+run_pipeline() does a delete+reinsert per trial it's scoped to, so a changed
+trial's findings get fresh finding_ids and NULL first_seen_at every call.
+check_updates() snapshots each changed trial's pre-existing findings by
 content hash (ctcm.adjudicate.content_hash -- findings have no stable id
-across a re-run) before calling run_pipeline(), and restores each
-surviving hash's original first_seen_at afterward; only hashes that are new
-AND belong to a trial this pass actually found new versions for count as
-"new findings" (logged to data/monitor_log.jsonl and stamped with now()).
+across a re-run) as a per-hash *list* of prior first_seen_at values, not a
+set/dict keyed by hash alone: two findings can legitimately share an
+identical content hash within one trial (duplicate/near-duplicate outcome
+text is real registry data), and a set would collapse them, letting one
+silently inherit the other's first_seen_at (task14-review.md Important #3).
+Reconciliation consumes each hash's queue of prior values in order as
+matching post-rerun rows are seen; once a hash's queue is empty, further rows
+with that hash are the surplus -- i.e. a count increase -- and are genuinely
+new: stamped with now() and logged to data/monitor_log.jsonl.
+
 run_pipeline(t3_enabled=True, t3_limit=0) -- NOT t3_enabled=False -- so that
 reconciliation is exact: ctcm.match.T3Client checks llm_cache before it
 checks the call budget (same reason the Makefile's own `pipeline` target
 defaults T3_LIMIT=0), so a limit of 0 only blocks a genuinely new `claude -p`
 call and never a previously-cached tier decision. t3_enabled=False would
 skip T3Client entirely, bypassing that cache lookup, and flip every
-previously LLM-resolved pair on EVERY trial in the corpus (not just this
-pass's changed ones) to T2_UNRESOLVED -- since run_pipeline() re-diffs
-everyone, that would spuriously mint "new" content hashes wholesale. With
-t3_limit=0, an unchanged trial's outcomes are byte-identical to last run, so
-its candidate pairs replay to the same cache hit (or the same
-T2_UNRESOLVED, if uncached) every time -- reconciliation only ever needs to
-distinguish genuinely new registry versions from a fully reproducible replay.
+previously LLM-resolved pair on a changed trial to T2_UNRESOLVED, minting
+spurious "new" content hashes. With t3_limit=0, an unchanged candidate pair
+replays to the same cache hit (or the same T2_UNRESOLVED, if uncached) every
+time -- reconciliation only ever needs to distinguish genuinely new registry
+content from a fully reproducible replay.
 """
 
 import asyncio
@@ -172,14 +184,17 @@ def _retry_on_lock(fn, retries: int = 5, delay: float = 5.0):
 
 
 async def _fetch_new_snapshots(adapter: RegistryAdapter, nct: str, fresh: list[dict]) -> None:
+    """Fetches every wanted-but-not-yet-cached snapshot for one trial, then --
+    only once every one of them has landed on disk -- refreshes history.json.
+    If fetch_version raises partway through (network error, anything), the
+    exception propagates before history.json is touched at all: the old
+    history.json (and its smaller version count) is left exactly as it was,
+    so the next check_updates() pass sees the same known count and retries
+    the missing version, instead of load_corpus() later adopting the new,
+    larger count for a trial whose snapshot was never actually cached
+    (task14-review.md Critical #1 -- reproduced and fixed)."""
     trial_dir = config.CACHE_DIR / nct
     trial_dir.mkdir(parents=True, exist_ok=True)
-
-    # Refresh the cached history.json so load_corpus() (which reads it for
-    # each version's date/moduleLabels and derives trials.version_count from
-    # len(changes)) sees this pass's fresh counts, not a stale prior fetch.
-    history = {"changes": [{"version": v["version"], "date": v["date"], "moduleLabels": v["labels"]} for v in fresh]}
-    (trial_dir / "history.json").write_text(json.dumps(history))
 
     for v in sorted(_versions_to_fetch(fresh)):
         snap_path = trial_dir / f"v{v}.json.gz"
@@ -188,22 +203,31 @@ async def _fetch_new_snapshots(adapter: RegistryAdapter, nct: str, fresh: list[d
         snap = await adapter.fetch_version(nct, v)
         snap_path.write_bytes(gzip.compress(json.dumps(snap).encode()))
 
+    # Every wanted version is now confirmed cached -- safe to advance history.json.
+    # Atomic write (temp file + os.replace, via Path.replace) so a crash mid-write
+    # can't leave a half-written history.json either.
+    history = {"changes": [{"version": v["version"], "date": v["date"], "moduleLabels": v["labels"]} for v in fresh]}
+    tmp_path = trial_dir / "history.json.tmp"
+    tmp_path.write_text(json.dumps(history))
+    tmp_path.replace(trial_dir / "history.json")
+
 
 # ---- content-hash based new-finding detection -------------------------------------------
 
 
-def _all_findings_snapshot(conn: sqlite3.Connection) -> dict[str, dict[str, str | None]]:
-    """nct_id -> {content_hash: first_seen_at} for every finding currently in
-    the db, in one query. Covers every trial with existing findings (not just
-    this pass's changed set) because run_pipeline() delete+reinserts globally
-    -- see module docstring."""
-    out: dict[str, dict[str, str | None]] = {}
+def _findings_multiset(conn: sqlite3.Connection, nct: str) -> dict[str, list[str | None]]:
+    """content_hash -> list of first_seen_at values, one entry per finding
+    currently stored for this trial (module docstring: a list, not a set/dict
+    keyed by hash alone, because two findings can legitimately share an
+    identical content hash within one trial)."""
+    out: dict[str, list[str | None]] = {}
     for r in conn.execute(
-        "SELECT nct_id, from_version, to_version, change_type, before_measure, after_measure, first_seen_at "
-        "FROM findings"
+        "SELECT from_version, to_version, change_type, before_measure, after_measure, first_seen_at "
+        "FROM findings WHERE nct_id=? ORDER BY finding_id",
+        (nct,),
     ):
-        h = content_hash(r["nct_id"], r["from_version"], r["to_version"], r["change_type"], r["before_measure"], r["after_measure"])
-        out.setdefault(r["nct_id"], {})[h] = r["first_seen_at"]
+        h = content_hash(nct, r["from_version"], r["to_version"], r["change_type"], r["before_measure"], r["after_measure"])
+        out.setdefault(h, []).append(r["first_seen_at"])
     return out
 
 
@@ -221,51 +245,29 @@ def _log_new_finding(ts: str, row: sqlite3.Row) -> None:
         f.write(json.dumps(entry) + "\n")
 
 
-def _reconcile_findings(
-    conn: sqlite3.Connection, before_all: dict[str, dict[str, str | None]], changed: set[str], now: str
-) -> int:
-    """Restores first_seen_at across every trial run_pipeline() just
-    reinserted, and logs+stamps genuinely new findings for `changed` trials
-    only. Returns the count of logged new findings."""
-    ensure_schema(conn)
-    to_reconcile = set(before_all) | changed
-    rows_by_nct: dict[str, list[sqlite3.Row]] = {}
-    if to_reconcile:
-        placeholders = ",".join("?" * len(to_reconcile))
-        query = (
-            "SELECT finding_id, nct_id, from_version, to_version, change_type, severity, before_measure, after_measure "
-            f"FROM findings WHERE nct_id IN ({placeholders})"
-        )
-        for r in conn.execute(query, tuple(to_reconcile)):
-            rows_by_nct.setdefault(r["nct_id"], []).append(r)
-
-    new_count = 0
-    for nct in to_reconcile:
-        before = before_all.get(nct, {})
-        new_rows = []
-        for r in rows_by_nct.get(nct, []):
-            h = content_hash(nct, r["from_version"], r["to_version"], r["change_type"], r["before_measure"], r["after_measure"])
-            if h in before:
-                first_seen_at = before[h]
-            else:
-                first_seen_at = now
-                new_rows.append(r)
-            conn.execute("UPDATE findings SET first_seen_at=? WHERE finding_id=?", (first_seen_at, r["finding_id"]))
-
-        if nct in changed:
-            for row in new_rows:
-                _log_new_finding(now, row)
-            new_count += len(new_rows)
-        elif new_rows:
-            # run_pipeline() ran with t3_limit=0, which only ever replays a cache hit
-            # or the same T2_UNRESOLVED fallback (module docstring), so an unchanged
-            # trial's content hashes should never shift. Surface it loudly rather than
-            # silently dropping the mismatch (CLAUDE.md SS6).
-            logger.warning(
-                "nct %s produced %d new-hash finding(s) with no detected version change", nct, len(new_rows)
-            )
-    conn.commit()
-    return new_count
+def _reconcile_trial(conn: sqlite3.Connection, nct: str, before: dict[str, list[str | None]], now: str) -> list[sqlite3.Row]:
+    """Restores first_seen_at for every finding run_pipeline() just
+    reinserted for this trial, and returns the rows that are genuinely new
+    (for the caller to log + count). Multiset diff, not a set: each hash's
+    pre-existing first_seen_at values are consumed in order as matching
+    post-rerun rows are seen; once a hash's queue is empty, further rows with
+    that hash are the surplus -- a count increase -- and are genuinely new."""
+    queues = {h: list(vals) for h, vals in before.items()}
+    new_rows = []
+    for r in conn.execute(
+        "SELECT finding_id, nct_id, from_version, to_version, change_type, severity, before_measure, after_measure "
+        "FROM findings WHERE nct_id=? ORDER BY finding_id",
+        (nct,),
+    ).fetchall():
+        h = content_hash(nct, r["from_version"], r["to_version"], r["change_type"], r["before_measure"], r["after_measure"])
+        q = queues.get(h)
+        if q:
+            first_seen_at = q.pop(0)
+        else:
+            first_seen_at = now
+            new_rows.append(r)
+        conn.execute("UPDATE findings SET first_seen_at=? WHERE finding_id=?", (first_seen_at, r["finding_id"]))
+    return new_rows
 
 
 # ---- top-level entry point ---------------------------------------------------------------
@@ -281,9 +283,9 @@ class MonitorResult:
 async def check_updates(nct_ids: list[str], adapter: RegistryAdapter) -> MonitorResult:
     """Cheap re-check pass over nct_ids: refetch each trial's history list
     (~1 request/trial), fetch only genuinely new snapshots for trials whose
-    history grew, then re-run load_corpus()+run_pipeline() once for the whole
-    corpus (idempotent -- see module docstring for why this isn't scoped to
-    just the changed trials) and detect+log new findings by content hash."""
+    history grew, then re-run load_corpus()+run_pipeline() scoped to just
+    those changed trials and detect+log new findings by content hash (see
+    module docstring)."""
     conn = db.connect()
     ensure_schema(conn)
 
@@ -314,14 +316,21 @@ async def check_updates(nct_ids: list[str], adapter: RegistryAdapter) -> Monitor
 
     new_findings_total = 0
     if changed:
-        before_all = _all_findings_snapshot(conn)
+        before_all = {nct: _findings_multiset(conn, nct) for nct in changed}
         conn.close()  # load_corpus()/run_pipeline() open their own connections
 
-        _retry_on_lock(load_corpus)
-        _retry_on_lock(lambda: run_pipeline(t3_enabled=True, t3_limit=0))
+        _retry_on_lock(lambda: load_corpus(nct_ids=changed))
+        _retry_on_lock(lambda: run_pipeline(t3_enabled=True, t3_limit=0, nct_ids=changed))
 
         conn = db.connect()
-        new_findings_total = _reconcile_findings(conn, before_all, set(changed), datetime.now(timezone.utc).isoformat())
+        ensure_schema(conn)  # cheap idempotent re-check; guards a concurrent agent's race
+        now = datetime.now(timezone.utc).isoformat()
+        for nct in changed:
+            new_rows = _reconcile_trial(conn, nct, before_all[nct], now)
+            for row in new_rows:
+                _log_new_finding(now, row)
+            new_findings_total += len(new_rows)
+        conn.commit()
 
     conn.close()
     return MonitorResult(checked=len(nct_ids), changed=changed, new_findings=new_findings_total)

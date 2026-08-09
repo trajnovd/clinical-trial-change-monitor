@@ -50,6 +50,48 @@ def test_run_pipeline_writes_expected_finding_and_is_idempotent(tmp_path, monkey
     assert n_second == n_first  # delete+reinsert: re-running doesn't duplicate rows
 
 
+def _seed_nct2(conn):
+    conn.execute("INSERT INTO trials(nct_id, version_count) VALUES ('NCT2', 3)")
+    for v, d, start, start_type in [(0, "2020-03-12", "2020-02-21", "ACTUAL"), (9, "2020-04-16", "2020-02-21", "ACTUAL")]:
+        conn.execute("INSERT INTO versions(nct_id, version_no, version_date, module_labels) VALUES ('NCT2', ?, ?, '[]')", (v, d))
+        conn.execute(
+            "INSERT INTO timeline_facts(nct_id, version_no, start_date, start_date_type) VALUES ('NCT2', ?, ?, ?)",
+            (v, start, start_type),
+        )
+    conn.execute(
+        "INSERT INTO outcomes(nct_id, version_no, outcome_type, ordinal, measure, time_frame, measure_norm) "
+        "VALUES ('NCT2', 0, 'PRIMARY', 0, '7-point ordinal scale', 'Day 15', '7 point ordinal scale')"
+    )
+    conn.execute(
+        "INSERT INTO outcomes(nct_id, version_no, outcome_type, ordinal, measure, time_frame, measure_norm) "
+        "VALUES ('NCT2', 9, 'PRIMARY', 0, 'Time to recovery', 'Day 29', 'time to recovery')"
+    )
+    conn.commit()
+
+
+def test_run_pipeline_scoped_by_nct_ids_touches_only_the_named_trial(tmp_path, monkeypatch):
+    # task14-review.md Important #1: ctcm.monitor's scoped rerun relies on nct_ids narrowing
+    # the delete+reinsert to exactly the named trials, leaving every other trial's findings
+    # (and the finding_ids they already had) completely untouched.
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "test.db")
+    conn = db.connect()
+    _seed(conn)
+    _seed_nct2(conn)
+    conn.close()
+
+    n = run_pipeline(nct_ids=["NCT1"])
+    assert n >= 1
+
+    conn = db.connect()
+    nct1_rows = conn.execute("SELECT change_type FROM findings WHERE nct_id='NCT1'").fetchall()
+    nct2_rows = conn.execute("SELECT change_type FROM findings WHERE nct_id='NCT2'").fetchall()
+    conn.close()
+    assert any(r["change_type"] == "PRIMARY_REPLACED" for r in nct1_rows)
+    assert nct2_rows == []  # out of scope -- run_pipeline never touched NCT2 at all
+
+
 # ---- v10-report F1: tier_for's "T1" fallback on collapse-derived findings ---------
 
 

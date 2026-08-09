@@ -28,7 +28,7 @@ def _corpus_ids(conn, limit: int | None) -> list[str]:
 
 def _file_ids(path: str, limit: int | None) -> list[str]:
     ids = [line.strip() for line in open(path) if line.strip()]
-    return ids[:limit] if limit else ids
+    return ids[:limit] if limit is not None else ids  # limit=0 means zero, not unlimited (consistent with _corpus_ids)
 
 
 async def _main_async(args: argparse.Namespace) -> None:

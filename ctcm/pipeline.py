@@ -79,14 +79,26 @@ def _cascade_matcher(before: list[OutcomeRow], after: list[OutcomeRow], result: 
     return matcher, tier_for
 
 
-def run_pipeline(t3_enabled: bool = True, t3_limit: int | None = 200) -> int:
+def run_pipeline(t3_enabled: bool = True, t3_limit: int | None = 200, nct_ids: list[str] | None = None) -> int:
+    """nct_ids, if given, scopes the diff/classify pass to just those trials (used by
+    ctcm.monitor's scoped rerun so one changed trial doesn't force a full-corpus
+    delete+reinsert); default None re-diffs every trial in the trials table, the
+    original behaviour, unchanged for every other caller."""
     conn = db.connect()
     t3 = T3Client(conn, limit=t3_limit) if t3_enabled else None
-    nct_ids = [r[0] for r in conn.execute("SELECT nct_id FROM trials")]
+    if nct_ids is not None:
+        placeholders = ",".join("?" * len(nct_ids))
+        ids = (
+            [r[0] for r in conn.execute(f"SELECT nct_id FROM trials WHERE nct_id IN ({placeholders})", nct_ids)]
+            if nct_ids
+            else []
+        )
+    else:
+        ids = [r[0] for r in conn.execute("SELECT nct_id FROM trials")]
     total = 0
     tier_totals: Counter[str] = Counter()
 
-    for nct in nct_ids:
+    for nct in ids:
         versions = conn.execute(
             "SELECT version_no, version_date FROM versions WHERE nct_id=? ORDER BY version_no", (nct,)
         ).fetchall()

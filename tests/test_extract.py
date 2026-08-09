@@ -70,3 +70,26 @@ def test_load_corpus_twice_keeps_measure_norm_populated(tmp_path, monkeypatch):
     rows = conn.execute("SELECT measure_norm FROM outcomes WHERE nct_id='NCT04280705'").fetchall()
     assert rows, "expected outcome rows from the fixture"
     assert all(r["measure_norm"] for r in rows)
+
+
+def test_load_corpus_scoped_by_nct_ids_touches_only_the_named_trial(tmp_path, monkeypatch):
+    # task14-review.md Important #1: ctcm.monitor's scoped rerun relies on nct_ids narrowing
+    # the walk to exactly the named trial directories, not the whole cache dir.
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "test.db")
+
+    raw = json.loads((FIXTURES / "actt1_v0.json").read_text())
+    for nct in ("NCT00000001", "NCT00000002"):
+        trial_dir = config.CACHE_DIR / nct
+        trial_dir.mkdir(parents=True)
+        history = {"changes": [{"version": 0, "date": "2020-02-20", "moduleLabels": []}]}
+        (trial_dir / "history.json").write_text(json.dumps(history))
+        (trial_dir / "v0.json.gz").write_bytes(gzip.compress(json.dumps(raw).encode()))
+
+    load_corpus(nct_ids=["NCT00000001"])
+
+    conn = db.connect()
+    assert {r["nct_id"] for r in conn.execute("SELECT nct_id FROM trials")} == {"NCT00000001"}
+    assert {r["nct_id"] for r in conn.execute("SELECT DISTINCT nct_id FROM outcomes")} == {"NCT00000001"}
+    conn.close()

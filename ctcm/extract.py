@@ -130,12 +130,20 @@ def _outcomes_content_hash(outcomes: list[OutcomeRec]) -> str:
     return hashlib.sha256(blob.encode()).hexdigest()
 
 
-def load_corpus() -> None:
+def load_corpus(nct_ids: list[str] | None = None) -> None:
     """Walk data/cache/{nct}/, upsert trials/versions/outcomes/timeline_facts for every
     fetched (nct, version) snapshot found. Idempotent: INSERT OR REPLACE throughout, so
-    re-running after more of the ingest finishes just adds/refreshes rows."""
+    re-running after more of the ingest finishes just adds/refreshes rows.
+
+    nct_ids, if given, scopes the walk to just those trial directories (used by
+    ctcm.monitor's scoped rerun so one changed trial doesn't force a full-corpus pass);
+    default None preserves the original whole-cache-dir behaviour for every other
+    caller, unchanged."""
     conn = db.connect()
-    trial_dirs = sorted(p for p in config.CACHE_DIR.iterdir() if p.is_dir()) if config.CACHE_DIR.exists() else []
+    if nct_ids is not None:
+        trial_dirs = [config.CACHE_DIR / nct for nct in sorted(nct_ids) if (config.CACHE_DIR / nct).is_dir()]
+    else:
+        trial_dirs = sorted(p for p in config.CACHE_DIR.iterdir() if p.is_dir()) if config.CACHE_DIR.exists() else []
 
     for trial_dir in trial_dirs:
         nct = trial_dir.name
