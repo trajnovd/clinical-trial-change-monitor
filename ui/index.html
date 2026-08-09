@@ -165,6 +165,12 @@
     border-color: var(--accent);
     color: #fff;
   }
+  /* sponsor-chip: a single active exact-match filter (not a toggle in a fixed
+     vocabulary like the other chips) -- always shown pressed, cleared via its own
+     link rather than a click-to-toggle handler. */
+  .sponsor-chip { cursor: default; display: inline-flex; align-items: center; gap: .4rem; }
+  .sponsor-chip a { color: inherit; text-decoration: none; font-weight: 700; }
+  .sponsor-chip a:hover { opacity: .7; }
 
   .search-group { flex: 1 1 16rem; display: flex; align-items: center; gap: .4rem; margin-left: auto; }
   .search-input {
@@ -267,6 +273,20 @@
   }
   .bar-fill { display: block; height: 100%; background: var(--accent); border-radius: 999px; }
   .bar-label { font-size: .82rem; color: var(--ink-muted); }
+  /* low-N (fix round 1): dimmed fill + a small tag, not a hidden row -- the group is
+     real, only the rate's confidence is low. */
+  .bar-cell-low-n .bar-fill { background: var(--ink-muted); opacity: .5; }
+  .low-n-tag {
+    font-family: var(--mono);
+    font-size: .64rem;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    color: var(--ink-muted);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 0 .3rem;
+    margin-left: .2rem;
+  }
   .analytics-empty-note { font-size: .85rem; color: var(--ink-muted); margin-bottom: 1rem; }
 
   /* ---------- trial view ---------- */
@@ -1002,6 +1022,11 @@
   let indexSort = { key: "daysAfterEnrolment", dir: -1 };
   let indexFilters = { severity: new Set(), changeType: new Set(), sponsorClass: new Set(), phase: new Set() };
   let indexQuery = "";
+  // Exact-match sponsor filter (fix round 1, task16-review.md Critical-1) -- kept
+  // separate from indexQuery/`q`'s free-text substring search on purpose: it's the
+  // analytics sponsor row's own drill-down link, and must reproduce that row's exact
+  // numerator/denominator, not a broader substring match across three columns.
+  let indexSponsorFilter = "";
   let indexRequestSeq = 0; // guards against a slow, now-superseded fetch overwriting a newer one
 
   function currentIndexParams() {
@@ -1010,6 +1035,7 @@
       change_type: [...indexFilters.changeType],
       sponsor_class: [...indexFilters.sponsorClass],
       phase: [...indexFilters.phase],
+      sponsor: indexSponsorFilter,
       q: indexQuery,
       sort: (indexSort.dir === -1 ? "-" : "") + indexSort.key
     };
@@ -1029,14 +1055,15 @@
     indexSort = { key: "daysAfterEnrolment", dir: -1 };
     indexFilters = { severity: new Set(), changeType: new Set(), sponsorClass: new Set(), phase: new Set() };
     indexQuery = "";
-    // Drill-down from the analytics view: one filter key (sponsorClass/phase) or a
-    // search query (sponsor, matched via the existing free-text `q` param — there's
-    // no dedicated server-side sponsor filter) preset before the first fetch.
+    indexSponsorFilter = "";
+    // Drill-down from the analytics view: one filter key (severity/changeType/
+    // sponsorClass/phase) or the exact-match `sponsor` param preset before the first fetch.
     if (initialParams) {
       ["severity", "changeType", "sponsorClass", "phase"].forEach((key) => {
         initialParams.getAll(key).forEach((v) => indexFilters[key].add(v));
       });
       indexQuery = initialParams.get("q") || "";
+      indexSponsorFilter = initialParams.get("sponsor") || "";
     }
 
     const data = await fetchIndex({});
@@ -1059,6 +1086,15 @@
 
     const changedCount = counts.signalTrials;
 
+    // Exact-match sponsor filter has no chip (it's not a fixed small vocabulary like
+    // severity/class/phase) -- shown as its own clearable badge instead when active.
+    const sponsorFilterHtml = indexSponsorFilter
+      ? '<div class="filter-group"><span class="filter-label">Sponsor</span>' +
+          '<span class="chip sponsor-chip" aria-pressed="true">' + escapeHtml(indexSponsorFilter) +
+            ' <a href="#/" aria-label="Clear sponsor filter">&times;</a></span>' +
+        "</div>"
+      : "";
+
     app.innerHTML =
       topbarHtml() +
       '<main class="index-view">' +
@@ -1069,7 +1105,7 @@
           '<p class="tagline">Every version below was public the entire time. ' + escapeHtml(counts.caveat) + "</p>" +
         "</section>" +
         caseStudiesHtml(allRows) +
-        '<section class="filters" role="group" aria-label="Filter trials">' + chipsHtml +
+        '<section class="filters" role="group" aria-label="Filter trials">' + chipsHtml + sponsorFilterHtml +
           '<div class="search-group">' +
             '<span class="filter-label">Search</span>' +
             '<input type="search" class="search-input" id="index-search" placeholder="NCT ID, sponsor, condition…" value="' +
@@ -1089,7 +1125,7 @@
       "</main>";
 
     wireIndexInteractions();
-    const hasInitialFilter = indexQuery || Object.values(indexFilters).some((s) => s.size);
+    const hasInitialFilter = indexQuery || indexSponsorFilter || Object.values(indexFilters).some((s) => s.size);
     if (hasInitialFilter) await refreshLedger(); // drill-down from analytics: fetch filtered
     else renderLedgerRows(allRows); // no filters active: identical to the filtered result
   }
@@ -1116,7 +1152,10 @@
   }
 
   function wireIndexInteractions() {
-    document.querySelectorAll(".chip").forEach((chip) => {
+    // .sponsor-chip is a static "active filter" badge (cleared via its own <a>, not a
+    // toggle in indexFilters), so it's excluded here -- wiring it up would read
+    // indexFilters[undefined] (no data-filter-key) and throw on click.
+    document.querySelectorAll(".chip:not(.sponsor-chip)").forEach((chip) => {
       chip.addEventListener("click", () => {
         const { filterKey, filterValue } = chip.dataset;
         const set = indexFilters[filterKey];
@@ -1154,12 +1193,16 @@
 
        Drill-down (brief: "every sponsor/class/phase row clickable"): a row's
        href is one filter encoded as an index-view query string (#/?phase=...),
-       parsed back out by route()/renderIndexView above. Sponsor has no
-       dedicated server-side filter param, so it drills down via the existing
-       free-text search (`q`) instead — same mechanism, different param name.
-       Year/condition/timing/adjudication rows are display-only: the brief
-       scopes drill-down to sponsor/class/phase specifically, and /api/trials
-       has no year or condition filter to drill into anyway.
+       parsed back out by route()/renderIndexView above. class/phase reuse the
+       existing chip filters; sponsor uses a dedicated exact-match `sponsor`
+       param (fix round 1, task16-review.md Critical-1) rather than the
+       free-text `q` search — `q` is a substring match across three columns, so
+       a sponsor whose name is a substring of another's (e.g. "Pfizer" inside
+       "Wyeth is now a wholly owned subsidiary of Pfizer") would silently pull
+       in trials that aren't this row's. Year/condition/timing/adjudication
+       rows are display-only: the brief scopes drill-down to sponsor/class/
+       phase specifically, and /api/trials has no year or condition filter to
+       drill into anyway.
    ========================================================================= */
   function ratePct(rate) {
     return Math.round(rate * 1000) / 10; // one decimal place
@@ -1167,12 +1210,17 @@
 
   // Copy rule (brief): rates are always "N of M (P%)", never a bare percentage —
   // the bar's width is the same P, so the visual and the text never disagree.
-  function rateCellHtml(numerator, denominator, rate) {
+  // lowN (fix round 1, task16-review.md Important-1) dims the bar and tags the
+  // label on groups below the same floor MIN_SPONSOR_TRIALS applies elsewhere —
+  // shown, not hidden, since dropping a real category (e.g. "INDIV") would lose
+  // information the floor on the sponsor table doesn't have to give up.
+  function rateCellHtml(numerator, denominator, rate, lowN) {
     const p = ratePct(rate);
     return (
-      '<td><div class="bar-cell">' +
+      '<td><div class="bar-cell' + (lowN ? " bar-cell-low-n" : "") + '">' +
         '<span class="bar-track"><span class="bar-fill" style="width:' + p + '%"></span></span>' +
-        '<span class="bar-label mono">' + numerator + " of " + denominator + " (" + p + "%)</span>" +
+        '<span class="bar-label mono">' + numerator + " of " + denominator + " (" + p + "%)" +
+          (lowN ? ' <span class="low-n-tag">low N</span>' : "") + "</span>" +
       "</div></td>"
     );
   }
@@ -1195,7 +1243,7 @@
         "<tr" + (href ? ' class="drill-row" data-href="' + href + '" tabindex="0"' : "") + ">" +
           "<td>" + escapeHtml(String(label)) + "</td>" +
           '<td class="mono">' + r[sizeField] + "</td>" +
-          rateCellHtml(r[numField], r[denField], r.rate) +
+          rateCellHtml(r[numField], r[denField], r.rate, r.lowN) +
         "</tr>"
       );
     }).join("");
@@ -1228,9 +1276,16 @@
       ? ""
       : '<p class="analytics-empty-note">No sponsor in this corpus has the ≥5 trials this table requires.</p>';
 
+    // Fix round 1 (task16-review.md Critical-2): disclose, don't just silently drop,
+    // the CTIS trials every rate table below already excludes.
+    const ctisNote = data.ctisExcludedCount
+      ? '<p class="analytics-empty-note">EU CTIS trials (' + data.ctisExcludedCount + ') are monitored ' +
+        "prospectively and excluded from these rates until they accumulate version history.</p>"
+      : "";
+
     const sections = [
       analyticsTableHtml("Signal rate by sponsor (≥5 trials)", "Sponsor", data.signalRateBySponsor,
-        "sponsor", "signalTrials", "totalTrials", (r) => "q=" + encodeURIComponent(r.sponsor)),
+        "sponsor", "signalTrials", "totalTrials", (r) => "sponsor=" + encodeURIComponent(r.sponsor)),
       analyticsTableHtml("Signal rate by sponsor class", "Sponsor class", data.bySponsorClass,
         "sponsorClass", "signalTrials", "totalTrials", (r) => "sponsorClass=" + encodeURIComponent(r.sponsorClass)),
       analyticsTableHtml("Signal rate by phase", "Phase", data.byPhase,
@@ -1254,6 +1309,7 @@
           "<h1>Sponsor analytics</h1>" +
           '<p class="tagline">' + escapeHtml(data.caveat) + "</p>" +
         "</section>" +
+        ctisNote +
         sponsorNote +
         sections +
       "</main>";

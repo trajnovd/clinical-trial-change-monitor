@@ -142,6 +142,50 @@ def test_list_trials_q_matches_nct_id_sponsor_and_conditions(tmp_path, monkeypat
     assert client.get("/api/trials", params={"q": "nonexistent"}).json()["total"] == 0
 
 
+def test_list_trials_sponsor_is_exact_match_not_substring(tmp_path, monkeypatch):
+    """Fix round 1 (task16-review.md Critical-1): the analytics sponsor drill-down
+    needs an exact filter, distinct from q='s deliberate substring search -- a sponsor
+    whose name contains another's as a substring ("Pfizer" inside "Pfizer Sub Corp")
+    must not cross-match."""
+    _fixture_db(tmp_path, monkeypatch)
+    conn = db.connect()
+    conn.execute(
+        "INSERT INTO trials(nct_id, study_type, phase, overall_status, lead_sponsor, sponsor_class, "
+        "conditions, enrolment_count, first_posted_date, version_count) VALUES "
+        "('NCT3', 'INTERVENTIONAL', 'PHASE3', 'COMPLETED', 'Pfizer', 'INDUSTRY', '[]', 10, '2020-01-01', 1)"
+    )
+    conn.execute(
+        "INSERT INTO trials(nct_id, study_type, phase, overall_status, lead_sponsor, sponsor_class, "
+        "conditions, enrolment_count, first_posted_date, version_count) VALUES "
+        "('NCT4', 'INTERVENTIONAL', 'PHASE3', 'COMPLETED', 'Pfizer Sub Corp', 'INDUSTRY', '[]', 10, '2020-01-01', 1)"
+    )
+    # Simulates the registry's raw HTML-entity-escaped storage (see api.py's _ue
+    # docstring) -- exact match must decode this before comparing to the plain param.
+    conn.execute(
+        "INSERT INTO trials(nct_id, study_type, phase, overall_status, lead_sponsor, sponsor_class, "
+        "conditions, enrolment_count, first_posted_date, version_count) VALUES "
+        "('NCT5', 'INTERVENTIONAL', 'PHASE3', 'COMPLETED', 'AT&amp;T Health', 'INDUSTRY', '[]', 10, '2020-01-01', 1)"
+    )
+    conn.commit()
+    conn.close()
+
+    r = client.get("/api/trials", params={"sponsor": "Pfizer"})
+    assert r.json()["total"] == 1
+    assert r.json()["rows"][0]["nctId"] == "NCT3"
+
+    r = client.get("/api/trials", params={"sponsor": "Pfizer Sub Corp"})
+    assert r.json()["total"] == 1
+    assert r.json()["rows"][0]["nctId"] == "NCT4"
+
+    # q= is unchanged -- still a substring match across both (the contrast case).
+    assert client.get("/api/trials", params={"q": "Pfizer"}).json()["total"] == 2
+
+    # decoded param matches the raw HTML-entity-escaped stored value
+    r = client.get("/api/trials", params={"sponsor": "AT&T Health"})
+    assert r.json()["total"] == 1
+    assert r.json()["rows"][0]["nctId"] == "NCT5"
+
+
 def test_list_trials_sort_direction(tmp_path, monkeypatch):
     _fixture_db(tmp_path, monkeypatch)
     r = client.get("/api/trials", params={"sort": "nctId"})

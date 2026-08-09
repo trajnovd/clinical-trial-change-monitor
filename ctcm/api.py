@@ -94,6 +94,13 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(f"file:{config.DB_PATH}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
+    # Registers as a SQL function (not a table write -- fine on a mode=ro connection)
+    # so `sponsor` filtering (list_trials, fix round 1 Critical-1) can match the
+    # HTML-entity-decoded name the UI displays/sends against the raw-encoded value
+    # actually stored in lead_sponsor, without re-escaping the query param (unreliable:
+    # _ue's docstring notes the source registry uses non-standard entities like
+    # '&#x2F;', which html.escape() wouldn't reproduce on the way back in).
+    conn.create_function("html_unescape", 1, _ue)
     return conn
 
 
@@ -320,6 +327,7 @@ def list_trials(
     change_type: list[str] = Query(default=[]),
     sponsor_class: list[str] = Query(default=[]),
     phase: list[str] = Query(default=[]),
+    sponsor: str = "",
     q: str = "",
     sort: str = DEFAULT_SORT,
 ):
@@ -342,6 +350,15 @@ def list_trials(
     if phase:
         where.append(f"t.phase IN ({','.join('?' * len(phase))})")
         params += phase
+    if sponsor:
+        # Exact match (fix round 1, task16-review.md Critical-1): `q` below is a
+        # deliberate substring search across three columns, wrong for a drill-down
+        # that promises "this row's own trials" -- "Pfizer" must not also pull in
+        # "Wyeth is now a wholly owned subsidiary of Pfizer". html_unescape (_connect)
+        # decodes the stored value before comparing, since the UI sends the decoded
+        # display name, not the registry's raw HTML-entity-escaped one.
+        where.append("html_unescape(t.lead_sponsor) = ?")
+        params.append(sponsor)
     if q:
         where.append("(t.nct_id LIKE ? OR t.lead_sponsor LIKE ? OR t.conditions LIKE ?)")
         like = f"%{q}%"
@@ -468,7 +485,13 @@ def get_trial(nct_id: str):
 def get_analytics():
     """Task 16: sponsor/class/phase/year/condition/timing aggregations (ctcm.analytics),
     all sharing the /api/trials index header's caveat -- this corpus is completed,
-    results-posted trials only, which makes post-completion registry edits common."""
+    results-posted trials only, which makes post-completion registry edits common.
+
+    Every trials-table aggregate excludes Task 15's CTIS rows (see ctcm.analytics'
+    module docstring, Critical-2 fix): they're prospective-only and structurally can't
+    have a finding yet, so including them would dilute every rate with denominator-only
+    trials. `ctisExcludedCount` reports how many, so the UI can disclose it rather than
+    just silently dropping them."""
     conn = _connect()
     try:
         by_sponsor = analytics.signal_rate_by_sponsor(conn)
@@ -481,6 +504,7 @@ def get_analytics():
             "topConditions": top_conditions,
             "timingHistogram": analytics.timing_histogram(conn),
             "adjudicationConcernMix": analytics.adjudication_concern_mix(conn),
+            "ctisExcludedCount": analytics.excluded_ctis_count(conn),
             "caveat": RESULTS_POSTED_CAVEAT,
         }
     finally:

@@ -16,6 +16,19 @@ brief's phrasing.
 Every row carries its numerator and denominator alongside the rate (global-constraints
 brief: "never a bare rate") so a caller/reader can't be misled by a rounded percentage
 detached from how many trials it's actually counting.
+
+Fix round 1 (task16-review.md Critical-2): the concurrent Task 15 CTIS adapter writes
+prospective-only trials into this same `trials` table (`registry='ctis'`, tagged via
+ctcm.ctis.ensure_schema's ALTER TABLE). Every one of those rows has version_count=1 --
+structurally incapable of ever having a finding, since a finding requires a diffed
+version pair -- so folding them into these rate tables doesn't add real 0%-rate signal,
+it just dilutes every denominator with trials that were never eligible to contribute a
+numerator, and falsifies RESULTS_POSTED_CAVEAT (ctcm.api), which describes ctgov's
+completed/results-posted corpus, not CTIS's prospective one. `_ctgov_only()` below
+excludes them from every trials-table aggregate; `excluded_ctis_count()` reports how
+many, for the UI to disclose. timing_histogram/adjudication_concern_mix need no such
+filter -- they're keyed off findings/adjudications, which (per the same version_count=1
+constraint) can never contain a CTIS row in the first place.
 """
 
 import json
@@ -41,12 +54,40 @@ def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
     return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone() is not None
 
 
+def _has_registry_column(conn: sqlite3.Connection) -> bool:
+    """False for a fixture db (ctcm.db.connect()'s own SCHEMA has no `registry` column)
+    or any corpus that predates ctcm.ctis's ALTER TABLE -- every trial in that case is
+    ctgov by construction, nothing to exclude."""
+    return any(r["name"] == "registry" for r in conn.execute("PRAGMA table_info(trials)"))
+
+
+def _ctgov_only(conn: sqlite3.Connection) -> str:
+    """SQL fragment excluding Task 15's CTIS rows from a `trials`-table query -- see the
+    module docstring's Critical-2 note. '' (no-op) when the column doesn't exist yet."""
+    return "AND registry='ctgov'" if _has_registry_column(conn) else ""
+
+
+def excluded_ctis_count(conn: sqlite3.Connection) -> int:
+    """How many trials the aggregations below silently drop -- surfaced by the API/UI
+    so "excluded" doesn't mean "invisible"."""
+    if not _has_registry_column(conn):
+        return 0
+    (n,) = conn.execute("SELECT COUNT(*) FROM trials WHERE registry != 'ctgov'").fetchone()
+    return n
+
+
 def _rate_row(key_name: str, key_value, signal: int, total: int) -> dict:
     return {
         key_name: key_value,
         "signalTrials": signal,
         "totalTrials": total,
         "rate": round(signal / total, 4) if total else 0.0,
+        # Fix round 1 (task16-review.md Important-1): bySponsorClass/byPhase/byYear/
+        # top_conditions have no hard floor (dropping a real category like "INDIV" or a
+        # real early year would hide data, not protect it) -- but a group this small is
+        # exactly the "one trial swings 0% to 100%" case the sponsor floor exists to
+        # guard against, so it's flagged rather than silently presented at full confidence.
+        "lowN": total < MIN_SPONSOR_TRIALS,
     }
 
 
@@ -59,13 +100,13 @@ def _rate_by(conn: sqlite3.Connection, column: str, key_name: str, min_group_siz
     `column` is always a literal string from this module's own call sites below,
     never request input, so building it into the SQL text is safe (contrast
     ctcm.api.SORT_FIELDS, which whitelists a value that *does* come from a query
-    param before doing the same thing)."""
+    param before doing the same thing). Same reasoning covers `_ctgov_only`'s fragment."""
     rows = conn.execute(
         f"""
         SELECT {column} AS grp, COUNT(*) AS total,
                SUM(CASE WHEN nct_id IN (SELECT DISTINCT nct_id FROM findings WHERE severity='SIGNAL') THEN 1 ELSE 0 END) AS signal
         FROM trials
-        WHERE {column} IS NOT NULL
+        WHERE {column} IS NOT NULL {_ctgov_only(conn)}
         GROUP BY {column}
         HAVING COUNT(*) >= ?
         """,
@@ -107,7 +148,7 @@ def top_conditions(conn: sqlite3.Connection, limit: int = 20) -> list[dict]:
     signal_ids = {r[0] for r in conn.execute("SELECT DISTINCT nct_id FROM findings WHERE severity='SIGNAL'")}
     totals: Counter = Counter()
     signals: Counter = Counter()
-    for nct_id, conditions_json in conn.execute("SELECT nct_id, conditions FROM trials"):
+    for nct_id, conditions_json in conn.execute(f"SELECT nct_id, conditions FROM trials WHERE 1=1 {_ctgov_only(conn)}"):
         for cond in json.loads(conditions_json or "[]"):
             totals[cond] += 1
             if nct_id in signal_ids:

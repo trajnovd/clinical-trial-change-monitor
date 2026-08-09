@@ -115,7 +115,25 @@ def test_by_sponsor_class_has_no_floor_and_every_row_has_a_denominator(tmp_path,
     for r in rows:
         assert r["totalTrials"] > 0
         assert 0.0 <= r["rate"] <= 1.0
-        assert set(r) == {"sponsorClass", "signalTrials", "totalTrials", "rate"}
+        assert set(r) == {"sponsorClass", "signalTrials", "totalTrials", "rate", "lowN"}
+
+
+def test_by_sponsor_class_flags_low_n_instead_of_dropping_the_row(tmp_path, monkeypatch):
+    """Fix round 1 (task16-review.md Important-1): no hard floor here (dropping "INDIV"
+    or a real early year would hide data), but a group below MIN_SPONSOR_TRIALS must be
+    marked, not presented at the same confidence as a real-sample row."""
+    _fixture_db(tmp_path, monkeypatch)
+    conn = db.connect()
+    rows = analytics.by_sponsor_class(conn)
+    conn.close()
+
+    by_class = {r["sponsorClass"]: r for r in rows}
+    assert by_class["INDUSTRY"]["totalTrials"] == 5
+    assert by_class["INDUSTRY"]["lowN"] is False
+    assert by_class["NIH"]["totalTrials"] == 4
+    assert by_class["NIH"]["lowN"] is True
+    assert by_class["OTHER"]["totalTrials"] == 1
+    assert by_class["OTHER"]["lowN"] is True
 
 
 def test_by_phase_groups_correctly(tmp_path, monkeypatch):
@@ -138,6 +156,93 @@ def test_by_year_is_chronological_not_rate_sorted(tmp_path, monkeypatch):
 
     assert [r["year"] for r in rows] == sorted(r["year"] for r in rows)
     assert {r["year"] for r in rows} == {"2019", "2020", "2021"}
+
+
+# ---------------------------------------------------------------------------
+# CTIS exclusion (fix round 1, task16-review.md Critical-2)
+# ---------------------------------------------------------------------------
+
+
+def _seed_ctis_trial(conn):
+    """Same shape as ctcm.ctis's own inserts (version_count=1, so it can never have a
+    finding) -- added via raw SQL rather than importing ctcm.ctis, which is a
+    concurrently-edited file this task doesn't own."""
+    conn.execute("ALTER TABLE trials ADD COLUMN registry TEXT NOT NULL DEFAULT 'ctgov'")
+    conn.execute(
+        "INSERT INTO trials(nct_id, study_type, phase, overall_status, lead_sponsor, sponsor_class, "
+        "conditions, enrolment_count, first_posted_date, version_count, registry) VALUES "
+        "('2025-500000-11-00', 'INTERVENTIONAL', 'PHASE3', 'Authorised', 'Alpha', 'Pharmaceutical company', "
+        "'[\"Diabetes\"]', 10, '2026-01-01', 1, 'ctis')"
+    )
+    conn.commit()
+
+
+def test_ctis_trial_excluded_from_every_trials_table_aggregate(tmp_path, monkeypatch):
+    """A registry='ctis' trial is prospective-only and structurally can't have a
+    finding -- it must not dilute a denominator, appear as a spurious 0%-rate row of
+    its own vocabulary, or fabricate a chronologically-misleading byYear row."""
+    _fixture_db(tmp_path, monkeypatch)
+    conn = db.connect()
+    _seed_ctis_trial(conn)
+    conn.close()
+
+    conn = db.connect()
+    by_sponsor = analytics.signal_rate_by_sponsor(conn)
+    by_class = analytics.by_sponsor_class(conn)
+    by_phase_rows = analytics.by_phase(conn)
+    by_year_rows = analytics.by_year(conn)
+    conditions = analytics.top_conditions(conn)
+    excluded = analytics.excluded_ctis_count(conn)
+    conn.close()
+
+    alpha = next(r for r in by_sponsor if r["sponsor"] == "Alpha")
+    assert alpha["totalTrials"] == 5  # unmoved by the CTIS trial sharing its sponsor name
+    assert "Pharmaceutical company" not in {r["sponsorClass"] for r in by_class}
+    assert next(r for r in by_phase_rows if r["phase"] == "PHASE3")["totalTrials"] == 5
+    assert "2026" not in {r["year"] for r in by_year_rows}
+    diabetes = next(r for r in conditions if r["condition"] == "Diabetes")
+    assert diabetes["totalTrials"] == 6  # 5 Alpha + NCT-C0, not 7
+    assert excluded == 1
+
+
+def test_excluded_ctis_count_zero_when_registry_column_absent(tmp_path, monkeypatch):
+    """The common case today: a fixture (or any corpus) that predates ctcm.ctis's
+    ALTER TABLE has no `registry` column at all -- every trial is ctgov by
+    construction, nothing to exclude, no crash on the missing column."""
+    _fixture_db(tmp_path, monkeypatch)
+    conn = db.connect()
+    assert "registry" not in {r["name"] for r in conn.execute("PRAGMA table_info(trials)")}
+    assert analytics.excluded_ctis_count(conn) == 0
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Sponsor drill-down parity (fix round 1, task16-review.md Critical-1)
+# ---------------------------------------------------------------------------
+
+
+def test_sponsor_drilldown_parity_with_analytics_row(tmp_path, monkeypatch):
+    """The analytics UI's drill-down promises "click this row to see the trials
+    behind it" -- /api/trials?sponsor=<name> must return exactly the row's own
+    totalTrials/signalTrials, not a substring-matched superset. "Alpha Pharma"
+    contains "Alpha" as a substring -- proves sponsor= isn't reusing q='s LIKE."""
+    _fixture_db(tmp_path, monkeypatch)
+    conn = db.connect()
+    for i in range(5):
+        _trial(conn, f"NCT-AP{i}", "Alpha Pharma", "INDUSTRY", "PHASE2", "[]", "2022-01-01")
+    _finding(conn, "NCT-AP0", "SIGNAL", 5, 50)
+    conn.commit()
+    conn.close()
+
+    by_sponsor = {r["sponsor"]: r for r in client.get("/api/analytics").json()["signalRateBySponsor"]}
+    assert {"Alpha", "Alpha Pharma"} <= set(by_sponsor)
+
+    for name in ("Alpha", "Alpha Pharma"):
+        row = by_sponsor[name]
+        drilldown = client.get("/api/trials", params={"sponsor": name}).json()
+        assert drilldown["total"] == row["totalTrials"], name
+        signal_count = sum(1 for t in drilldown["rows"] if t["severity"] == "SIGNAL")
+        assert signal_count == row["signalTrials"], name
 
 
 # ---------------------------------------------------------------------------
@@ -276,11 +381,12 @@ def test_api_analytics_payload_shape(tmp_path, monkeypatch):
     body = r.json()
 
     assert set(body) == {
-        "signalRateBySponsor", "bySponsorClass", "byPhase", "byYear",
-        "topConditions", "timingHistogram", "adjudicationConcernMix", "caveat",
+        "signalRateBySponsor", "bySponsorClass", "byPhase", "byYear", "topConditions",
+        "timingHistogram", "adjudicationConcernMix", "ctisExcludedCount", "caveat",
     }
     assert "completed trials that posted results" in body["caveat"]
     assert body["adjudicationConcernMix"] == []  # no adjudications table in this fixture
+    assert body["ctisExcludedCount"] == 0  # no registry column in this fixture -- nothing to exclude
 
     assert {r["sponsor"] for r in body["signalRateBySponsor"]} == {"Alpha"}
     alpha = body["signalRateBySponsor"][0]
