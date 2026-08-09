@@ -98,7 +98,8 @@ positives among 75 dev trials pre-fix); revisit if `TIMEPOINT_CHANGED`
 volume grows enough for the false-suppression rate to matter.
 
 **Axis 2 -- when it changed, and why it collapses two phases into one code:**
-`ctcm/classify.py`'s severity override (`classify()`, ~lines 225-227)
+the POST_COMPLETION_CHANGE severity override in `ctcm/classify.py` (the
+`if days_pcd is not None and days_pcd >= 0` branch in `classify()`)
 unconditionally rewrites a finding's `change_type` to
 `POST_COMPLETION_CHANGE` for *any* primary change dated on/after
 `primary_completion_date`, regardless of what kind of change it is. That
@@ -149,8 +150,8 @@ the worked examples in each aren't identical in kind.
 `evaluate.py` calls `ctcm.pipeline.run_pipeline()`, which runs the full
 **T0-T3 semantic cascade** (`ctcm/match.py`), not bare T0 exact-string
 matching -- `t0_matcher` (`ctcm/classify.py`) is legacy unit-test scaffolding
-only, unused by the pipeline since Task 7 (`ctcm/classify.py:132`'s own
-comment: "v0.2 passes t0_matcher"). An earlier version of this document
+only, unused by the pipeline since Task 7 (`diff_pair()`'s own docstring in
+`ctcm/classify.py`: "v0.2 passes t0_matcher"). An earlier version of this document
 claimed `PRIMARY_NARROWED` could never be predicted because `t0_matcher`
 never returns `"NARROWED"` -- that was true of the matcher named, but not of
 the pipeline actually invoked, and was flagged wrong in review

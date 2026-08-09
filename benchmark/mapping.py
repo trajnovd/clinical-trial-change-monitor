@@ -38,7 +38,8 @@ CHANGE_TYPES = (
 )
 
 PHASE_PREFIXES = ("change_a_i_", "change_i_p_", "change_p_l_")
-# ctcm/classify.py's severity override (classify(), ~lines 225-227) unconditionally
+# ctcm/classify.py's severity override in classify() -- the
+# `if days_pcd is not None and days_pcd >= 0` branch -- unconditionally
 # rewrites change_type to POST_COMPLETION_CHANGE for any primary change dated
 # on/after primary_completion_date, regardless of what kind of change it is -- so
 # for Holst's post-completion and post-publication phases, the axis-1 identity
