@@ -296,9 +296,9 @@ of use:
 
 | TECH-PRD | Built instead | Why | Upgrade path |
 |---|---|---|---|
-| DuckDB | **sqlite3** (`ctcm/db.py:2`) | Single-writer, single-file store at this corpus size doesn't need DuckDB's analytical/columnar strengths; sqlite is zero-setup and ships with Python | Swap the `db.py` connection layer for DuckDB if concurrent-writer or genuinely analytical (columnar aggregation over millions of rows) needs appear |
-| `sentence-transformers` embedding retrieval + fine-tuned cross-encoder (T1/T2) | **Token-set Jaccard (T1) + a deterministic rule discriminator (T2)** (`ctcm/match.py:14,30`) | No labeled training data existed yet to fine-tune a cross-encoder against; lexical + rule matching is auditable (every T2 decision traces to a specific lexicon entry) and got the cascade shipped without a training pipeline | Swap in `sentence-transformers` (e.g. a biomedical encoder) for T1 if Jaccard's accuracy plateaus below target; train a cross-encoder on adjudicated/benchmark-confirmed pairs once enough exist |
-| Direct Claude API calls | **`claude -p` CLI subprocess** (`ctcm/match.py:30`, `ctcm/adjudicate.py`) | No API key plumbing/billing setup needed during development; the CLI was already authenticated in the dev environment | Swap `subprocess.run(["claude", "-p", ...])` for a direct API client call if CLI startup latency or subprocess overhead becomes the bottleneck at higher T3/adjudication volume |
+| DuckDB | **sqlite3** (`ctcm/db.py` (the `sqlite3` import and `connect()`)) | Single-writer, single-file store at this corpus size doesn't need DuckDB's analytical/columnar strengths; sqlite is zero-setup and ships with Python | Swap the `db.py` connection layer for DuckDB if concurrent-writer or genuinely analytical (columnar aggregation over millions of rows) needs appear |
+| `sentence-transformers` embedding retrieval + fine-tuned cross-encoder (T1/T2) | **Token-set Jaccard (T1) + a deterministic rule discriminator (T2)** (`ctcm/match.py` (`_jaccard` and `_qualifier_relation`)) | No labeled training data existed yet to fine-tune a cross-encoder against; lexical + rule matching is auditable (every T2 decision traces to a specific lexicon entry) and got the cascade shipped without a training pipeline | Swap in `sentence-transformers` (e.g. a biomedical encoder) for T1 if Jaccard's accuracy plateaus below target; train a cross-encoder on adjudicated/benchmark-confirmed pairs once enough exist |
+| Direct Claude API calls | **`claude -p` CLI subprocess** (`ctcm/match.py` (the `T3Client` subprocess call), `ctcm/adjudicate.py`) | No API key plumbing/billing setup needed during development; the CLI was already authenticated in the dev environment | Swap `subprocess.run(["claude", "-p", ...])` for a direct API client call if CLI startup latency or subprocess overhead becomes the bottleneck at higher T3/adjudication volume |
 | React + Vite + Tailwind | **Vanilla HTML/CSS/JS, one file, no build step** (`ui/index.html`) | A single timeline-scrubber view doesn't need componentization or a build pipeline; zero-build keeps `make serve` instant and the whole UI auditable in one file | Migrate to React/Vite once the UI grows past one view (e.g. the aggregate index + filtering gets its own page) or state management gets unwieldy in vanilla JS |
 
 Every deviation trades a documented, real capability (columnar analytics,
@@ -539,7 +539,7 @@ incapable of a finding, since a finding needs a diffed version pair. Folding
 them into these tables wouldn't add real 0%-rate signal; it would dilute
 every denominator with trials that were never eligible to contribute a
 numerator, and would falsify the shared `RESULTS_POSTED_CAVEAT`
-(`ctcm/api.py:43`), which describes ctgov's completed/results-posted corpus
+(`ctcm/api.py` (`RESULTS_POSTED_CAVEAT`)), which describes ctgov's completed/results-posted corpus
 specifically. `_ctgov_only()` (line 64) excludes CTIS rows from every
 `trials`-table aggregate; `excluded_ctis_count()` (line 70) reports how
 many, surfaced by `/api/analytics` as `ctisExcludedCount` so the exclusion
@@ -549,7 +549,7 @@ is disclosed rather than invisible. `timing_histogram`/
 never contain a CTIS row in the first place.
 
 **Limitation: sponsor names are grouped as the registry wrote them.**
-`lead_sponsor` (`ctcm/extract.py:111`) is stored verbatim from
+`lead_sponsor` (`ctcm/extract.py` (`extract_snapshot`'s sponsor field)) is stored verbatim from
 `leadSponsor.name`, with no canonicalization pass — the same sponsor
 registered under two spellings (e.g. a name change, a punctuation variant)
 splits into two rows here rather than one, each with its own (smaller, and
