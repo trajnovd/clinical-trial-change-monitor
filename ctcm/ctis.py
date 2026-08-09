@@ -12,14 +12,16 @@ EU coverage of this whole product begins at that adoption date, not retroactivel
 
 Design consequence: OUR "versions" are self-manufactured, not registry-provided.
 snapshot_pass() polls GET /retrieve/{ctNumber} for each watched trial and keeps a
-new gzipped copy (data/cache/ctis/{ctNumber}/snap-{YYYY-MM-DD}.json.gz) ONLY when
-its outcome-relevant content hash differs from the most recently kept snapshot (or
-none exists yet) -- same sha256-of-canonical-JSON discipline as
+new gzipped copy (data/cache/ctis/{ctNumber}/snap-{YYYY-MM-DD}.json.gz, or
+snap-{YYYY-MM-DD}-{N}.json.gz for a same-day collision -- see _write_snapshot) ONLY
+when its outcome-relevant content hash differs from the most recently kept snapshot
+(or none exists yet) -- same sha256-of-canonical-JSON discipline as
 ctcm.extract._outcomes_content_hash, reimplemented here (not imported) because it
 operates on this module's plain-dict outcome shape, not extract.py's pydantic
-OutcomeRec. Every kept snapshot IS a version by construction, so there is no
-separate "which of the fetched revisions do we bother keeping" fetch rule the way
-ctcm.ingest/ctcm.monitor need for CT.gov's real history list.
+OutcomeRec. Every kept snapshot IS a version by construction, one physical file per
+version, so there is no separate "which of the fetched revisions do we bother
+keeping" fetch rule the way ctcm.ingest/ctcm.monitor need for CT.gov's real history
+list.
 
 CTISAdapter (the ctcm.monitor.RegistryAdapter shape, commit 42d31f3) is a pure
 LOCAL reader over that snapshot series -- list_versions()/fetch_version() never
@@ -222,34 +224,63 @@ def _trial_dir(ct_number: str) -> Path:
     return d
 
 
-def _snap_path(ct_number: str, snap_date: date) -> Path:
-    return _trial_dir(ct_number) / f"snap-{snap_date.isoformat()}.json.gz"
+def _parse_snap_stem(stem: str) -> tuple[date, int]:
+    """stem is a snap file's name minus the '.json.gz' suffix: 'YYYY-MM-DD' (a day's
+    first kept snapshot, intraday order 1) or 'YYYY-MM-DD-N' (N=2,3,... -- a same-day
+    collision suffix, task15-review.md Important #2). Raises ValueError on anything
+    else, same as a bare date.fromisoformat would."""
+    if len(stem) == 10:
+        return date.fromisoformat(stem), 1
+    date_part, _, n = stem.rpartition("-")
+    return date.fromisoformat(date_part), int(n)
 
 
-def _local_snapshot_dates(ct_number: str) -> list[date]:
-    """Every date this ct_number has a kept snapshot for, oldest first. Directory may not
-    exist yet (first-ever snapshot_pass for this trial) -- that's an empty series, not an
-    error."""
+def _snap_date(path: Path) -> date:
+    return _parse_snap_stem(path.name[len("snap-") : -len(".json.gz")])[0]
+
+
+def _local_snapshots(ct_number: str) -> list[Path]:
+    """Every kept snapshot FILE for this ct_number, oldest first (chronological, then
+    same-day collision order) -- the local "version series" both CTISAdapter and
+    snapshot_pass's hash gate read from. One entry per physical file, not per calendar
+    date: a same-day collision (I2 fix, _write_snapshot below) keeps its own file and
+    therefore its own entry here, so `len(...)` -- used for version_no assignment --
+    never undercounts a genuinely-kept intraday snapshot. Directory may not exist yet
+    (first-ever snapshot_pass for this trial) -- that's an empty series, not an error."""
     d = config.CACHE_DIR / "ctis" / ct_number
     if not d.exists():
         return []
-    dates = []
+    paths = []
     for p in d.glob("snap-*.json.gz"):
         try:
-            # p.name is "snap-YYYY-MM-DD.json.gz"; .stem only strips one suffix (.gz), so
-            # slice both ends explicitly (same approach as ctcm.extract._version_of).
-            dates.append(date.fromisoformat(p.name[len("snap-") : -len(".json.gz")]))
+            _parse_snap_stem(p.name[len("snap-") : -len(".json.gz")])
         except ValueError:
             continue
-    return sorted(dates)
+        paths.append(p)
+    return sorted(paths, key=lambda p: _parse_snap_stem(p.name[len("snap-") : -len(".json.gz")]))
 
 
-def _read_snapshot(ct_number: str, snap_date: date) -> dict:
-    return json.loads(gzip.decompress(_snap_path(ct_number, snap_date).read_bytes()))
+def _read_snapshot(path: Path) -> dict:
+    return json.loads(gzip.decompress(path.read_bytes()))
 
 
-def _write_snapshot(ct_number: str, snap_date: date, raw: dict) -> None:
-    _snap_path(ct_number, snap_date).write_bytes(gzip.compress(json.dumps(raw).encode()))
+def _write_snapshot(ct_number: str, snap_date: date, raw: dict) -> Path:
+    """Writes a new kept snapshot. Never overwrites an existing file: a same-day second
+    (or third, ...) call whose content genuinely differs gets a -2/-3/... suffix instead
+    of clobbering snap-{date}.json.gz -- the designed cadence is one pass/day, so this is
+    a rare edge rather than the common case, but it must never destroy a prior call's raw
+    payload (task15-review.md Important #2: the old behavior silently overwrote it,
+    orphaning the earlier versions row from any backing file). Returns the path written.
+    # ponytail: unbounded linear probe for the next free suffix -- fine at same-day
+    # collision counts in the single digits; revisit if same-day multi-snapshot ever
+    # becomes routine rather than a rare edge."""
+    path = _trial_dir(ct_number) / f"snap-{snap_date.isoformat()}.json.gz"
+    n = 2
+    while path.exists():
+        path = _trial_dir(ct_number) / f"snap-{snap_date.isoformat()}-{n}.json.gz"
+        n += 1
+    path.write_bytes(gzip.compress(json.dumps(raw).encode()))
+    return path
 
 
 # ---- RegistryAdapter (ctcm.monitor protocol), local-only ------------------------------
@@ -260,11 +291,10 @@ class CTISAdapter:
     docstring for why this never makes a network call itself."""
 
     async def list_versions(self, ct_number: str) -> list[dict]:
-        return [{"version": i, "date": d.isoformat(), "labels": []} for i, d in enumerate(_local_snapshot_dates(ct_number))]
+        return [{"version": i, "date": _snap_date(p).isoformat(), "labels": []} for i, p in enumerate(_local_snapshots(ct_number))]
 
     async def fetch_version(self, ct_number: str, version: int) -> dict:
-        dates = _local_snapshot_dates(ct_number)
-        return _read_snapshot(ct_number, dates[version])
+        return _read_snapshot(_local_snapshots(ct_number)[version])
 
 
 # ---- HTTP: serialized dispatch with a pacing floor, backoff on 429/5xx ------------------
@@ -415,10 +445,10 @@ async def snapshot_pass(ct_numbers: list[str], client: httpx.AsyncClient, today:
     """Fetch today's live state for each ct_number (GET /retrieve/{ctNumber}), and keep it
     as a new local snapshot + upsert trials/versions/outcomes ONLY if its outcome-relevant
     hash differs from the most recently kept snapshot (or none exists yet) -- the hash gate
-    that makes a same-day rerun a no-op (data/cache/ctis/{ct}/snap-{today}.json.gz would
-    collide with an already-kept same-day file if content genuinely changed intraday;
-    # ponytail: not handled -- the designed cadence is one pass/day, and re-running the
-    same day is exactly the no-op case this gate is built to prove).
+    that makes a same-day rerun with unchanged content a no-op. A same-day rerun whose
+    content genuinely changed intraday is NOT a no-op: it's a real second version, kept
+    under a collision-suffixed filename by _write_snapshot rather than overwriting the
+    first call's raw payload (task15-review.md Important #2).
     One trial's failure never aborts the batch (same shape as ctcm.ingest.ingest)."""
     today = today or datetime.now(timezone.utc).date()
     pacer = _Pacer()
@@ -440,8 +470,8 @@ async def snapshot_pass(ct_numbers: list[str], client: httpx.AsyncClient, today:
 
         outcomes = map_outcomes(raw)
         new_hash = outcomes_content_hash(outcomes)
-        existing = _local_snapshot_dates(ct)
-        prior_hash = outcomes_content_hash(map_outcomes(_read_snapshot(ct, existing[-1]))) if existing else None
+        existing = _local_snapshots(ct)
+        prior_hash = outcomes_content_hash(map_outcomes(_read_snapshot(existing[-1]))) if existing else None
 
         if prior_hash == new_hash:
             skipped.append(ct)

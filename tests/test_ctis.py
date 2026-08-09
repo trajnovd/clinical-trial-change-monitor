@@ -231,6 +231,44 @@ def test_snapshot_pass_stores_new_version_when_primary_endpoint_text_changes(tmp
     assert trial["version_count"] == 2
 
 
+def test_snapshot_pass_same_day_collision_suffixes_the_filename_instead_of_overwriting(tmp_path, monkeypatch):
+    """task15-review.md Important #2: a same-day second snapshot_pass call whose content
+    genuinely changed must not overwrite the first call's raw payload -- two files on
+    disk, two versions rows, nothing lost."""
+    _patch_config(tmp_path, monkeypatch)
+    _fast(monkeypatch)
+    changed = _changed_primary("1. A same-day, later, materially different primary endpoint")
+    same_day = date(2026, 8, 9)
+
+    async def run():
+        async with httpx.AsyncClient(transport=_retrieve_transport({CT: BASE}), base_url="http://test") as client:
+            r1 = await ctis.snapshot_pass([CT], client, today=same_day)
+        async with httpx.AsyncClient(transport=_retrieve_transport({CT: changed}), base_url="http://test") as client:
+            r2 = await ctis.snapshot_pass([CT], client, today=same_day)
+        return r1, r2
+
+    r1, r2 = asyncio.run(run())
+    assert r1.stored == [CT]
+    assert r2.stored == [CT]  # genuinely different content -- kept, not skipped, despite the same date
+
+    on_disk = {p.name for p in (config.CACHE_DIR / "ctis" / CT).glob("snap-*.json.gz")}
+    assert on_disk == {"snap-2026-08-09.json.gz", "snap-2026-08-09-2.json.gz"}  # two distinct files, not one overwritten
+
+    # _local_snapshots (not a raw lexicographic sort -- "-2.json.gz" sorts before ".json.gz"
+    # as plain strings) orders them chronologically + by intraday collision order.
+    files = ctis._local_snapshots(CT)
+    assert [p.name for p in files] == ["snap-2026-08-09.json.gz", "snap-2026-08-09-2.json.gz"]
+    # nothing overwritten: the first file still holds exactly what the first call fetched
+    assert ctis._read_snapshot(files[0]) == BASE
+    assert ctis._read_snapshot(files[1]) == changed
+
+    conn = db.connect()
+    versions = conn.execute("SELECT version_no, version_date FROM versions WHERE nct_id=? ORDER BY version_no", (CT,)).fetchall()
+    conn.close()
+    assert [v["version_no"] for v in versions] == [0, 1]  # both rows kept, not collapsed
+    assert versions[0]["version_date"] == versions[1]["version_date"] == "2026-08-09"
+
+
 def test_snapshot_pass_one_trial_failure_does_not_abort_the_batch(tmp_path, monkeypatch):
     _patch_config(tmp_path, monkeypatch)
     _fast(monkeypatch)

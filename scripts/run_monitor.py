@@ -3,9 +3,15 @@
 
 Single pass, cron-friendly -- no daemon mode (see Makefile's `monitor` target
 for a crontab line). --watch corpus checks every trial already in the db
-(data/ctcm.db, populated by a prior `make ingest`+`make load`), optionally
-capped by --limit to the N most-recently-updated (by latest version_date).
---watch path/to/ids.txt checks the NCT IDs listed there, one per line.
+(data/ctcm.db, populated by a prior `make ingest`+`make load`, or `make ctis`),
+optionally capped by --limit to the N most-recently-updated (by latest
+version_date). --watch path/to/ids.txt checks the ids listed there, one per line.
+
+Mixed-registry aware (task15-review.md Important #1): `trials` can hold both
+CT.gov (NCT ids) and CTIS (ctNumber) rows; check_updates() routes each id to
+the right check by its trials.registry column, so this script doesn't need to
+know or care which registry any given id belongs to -- it just opens a client
+for each and hands both over.
 """
 
 import argparse
@@ -14,6 +20,7 @@ import asyncio
 import httpx
 
 from ctcm import config, db
+from ctcm.ctis import CTISAdapter
 from ctcm.monitor import CTGovAdapter, check_updates
 
 
@@ -37,8 +44,12 @@ async def _main_async(args: argparse.Namespace) -> None:
     conn.close()
 
     print(f"monitor: checking {len(nct_ids)} trial(s) ({args.watch})", flush=True)
-    async with httpx.AsyncClient(base_url=config.CT_GOV_BASE, timeout=30) as client:
-        result = await check_updates(nct_ids, CTGovAdapter(client))
+    async with (
+        httpx.AsyncClient(base_url=config.CT_GOV_BASE, timeout=30) as ctgov_client,
+        httpx.AsyncClient(timeout=30) as ctis_client,
+    ):
+        adapters = {"ctgov": CTGovAdapter(ctgov_client), "ctis": CTISAdapter()}
+        result = await check_updates(nct_ids, adapters, ctis_client=ctis_client)
 
     print(
         f"monitor done: checked {result.checked}, {len(result.changed)} with new version(s), "

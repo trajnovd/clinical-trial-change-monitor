@@ -47,6 +47,23 @@ spurious "new" content hashes. With t3_limit=0, an unchanged candidate pair
 replays to the same cache hit (or the same T2_UNRESOLVED, if uncached) every
 time -- reconciliation only ever needs to distinguish genuinely new registry
 content from a fully reproducible replay.
+
+Registry routing (task15-review.md Important #1, fixed here): the shared
+`trials` table now holds both CT.gov and CTIS rows (ctcm/ctis.py, `registry`
+column, 'ctgov' default). check_updates() reads that column per nct_id and
+splits nct_ids into ctgov_ids/ctis_ids BEFORE any network call -- a CTIS
+ct-number never reaches CTGovAdapter (it would build a garbage
+/api/int/studies/{ct-number}/history URL against ClinicalTrials.gov, 404 or
+worse, and be swallowed by the existing per-trial except-and-log). ctgov_ids
+go through the CTGovAdapter flow below, unchanged. ctis_ids are handed once,
+batched, to ctcm.ctis.snapshot_pass() -- NOT to CTISAdapter.list_versions/
+fetch_version: CTISAdapter is a pure LOCAL reader (ctcm/ctis.py's own
+docstring), so calling it here would just re-read what's already on disk and
+never detect a real external change. snapshot_pass() (fetch current state,
+hash-gate, store if changed) IS the genuine "check" for a CTIS trial; calling
+it once for the whole ctis_ids batch (rather than fanning it out through this
+function's own per-trial semaphore) preserves its own internal serialized-
+request pacing, which per-trial concurrent calls would defeat.
 """
 
 import asyncio
@@ -62,6 +79,7 @@ from typing import Protocol
 import httpx
 
 from ctcm import config, db, ingest
+from ctcm import ctis as ctis_mod
 from ctcm.adjudicate import content_hash
 from ctcm.extract import load_corpus
 from ctcm.pipeline import run_pipeline
@@ -164,6 +182,19 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError as e:
         if "duplicate column" not in str(e).lower():
             raise
+
+
+def _registries_of(conn: sqlite3.Connection, nct_ids: list[str]) -> dict[str, str]:
+    """nct_id -> trials.registry for whichever of nct_ids are actually in the table.
+    Missing entirely (a pre-Task-15 db with no `registry` column, or an id
+    check_updates() was asked about that isn't in `trials` yet) default to 'ctgov' at
+    the call site below -- this only ever returns what's genuinely on record."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(trials)")}
+    if "registry" not in cols or not nct_ids:
+        return {}
+    placeholders = ",".join("?" * len(nct_ids))
+    rows = conn.execute(f"SELECT nct_id, registry FROM trials WHERE nct_id IN ({placeholders})", nct_ids).fetchall()
+    return {r["nct_id"]: r["registry"] for r in rows if r["registry"]}
 
 
 def _retry_on_lock(fn, retries: int = 5, delay: float = 5.0):
@@ -280,42 +311,78 @@ class MonitorResult:
     new_findings: int
 
 
-async def check_updates(nct_ids: list[str], adapter: RegistryAdapter) -> MonitorResult:
-    """Cheap re-check pass over nct_ids: refetch each trial's history list
-    (~1 request/trial), fetch only genuinely new snapshots for trials whose
-    history grew, then re-run load_corpus()+run_pipeline() scoped to just
-    those changed trials and detect+log new findings by content hash (see
-    module docstring)."""
+async def check_updates(
+    nct_ids: list[str],
+    adapters: dict[str, RegistryAdapter],
+    ctis_client: httpx.AsyncClient | None = None,
+) -> MonitorResult:
+    """Cheap re-check pass over nct_ids, routed per trial by trials.registry ('ctgov'
+    default -- see _registries_of):
+
+    - ctgov-registry trials: unchanged from before this fix -- refetch each trial's
+      history list (~1 request/trial) via adapters['ctgov'], fetch only genuinely new
+      snapshots for trials whose history grew.
+    - ctis-registry trials: batched once through ctcm.ctis.snapshot_pass(ctis_ids,
+      ctis_client) -- see module docstring for why this bypasses adapters['ctis']
+      entirely. adapters['ctis'] is still required whenever ctis_ids is non-empty
+      (fail fast if a caller forgot to declare CTIS support, e.g. by constructing
+      ctcm.ctis.CTISAdapter()), it's just not the thing that gets called.
+
+    Either way, then re-run load_corpus()+run_pipeline() scoped to just the trials this
+    pass found changed and detect+log new findings by content hash (see module
+    docstring)."""
     conn = db.connect()
     ensure_schema(conn)
+    ctis_mod.ensure_schema(conn)  # trials.registry column guard -- ctcm.ctis owns this ALTER
 
-    sem = asyncio.Semaphore(MAX_CONCURRENCY)
+    registry_of = _registries_of(conn, nct_ids)
+    ctgov_ids = [n for n in nct_ids if registry_of.get(n, "ctgov") == "ctgov"]
+    ctis_ids = [n for n in nct_ids if registry_of.get(n, "ctgov") == "ctis"]
+
     changed: list[str] = []
-    changed_lock = asyncio.Lock()
 
-    async def _one(nct: str) -> None:
-        async with sem:
-            try:
-                fresh = await adapter.list_versions(nct)
-            except Exception:
-                logger.exception("failed to check history for %s", nct)
-                return
-            row = conn.execute("SELECT version_count FROM trials WHERE nct_id=?", (nct,)).fetchone()
-            known = row["version_count"] if row and row["version_count"] is not None else 0
-            if len(fresh) <= known:
-                return
-            try:
-                await _fetch_new_snapshots(adapter, nct, fresh)
-            except Exception:
-                logger.exception("failed to fetch new snapshots for %s", nct)
-                return
-            async with changed_lock:
-                changed.append(nct)
+    if ctgov_ids:
+        adapter = adapters["ctgov"]
+        sem = asyncio.Semaphore(MAX_CONCURRENCY)
+        changed_lock = asyncio.Lock()
 
-    await asyncio.gather(*(_one(nct) for nct in nct_ids))
+        async def _one(nct: str) -> None:
+            async with sem:
+                try:
+                    fresh = await adapter.list_versions(nct)
+                except Exception:
+                    logger.exception("failed to check history for %s", nct)
+                    return
+                row = conn.execute("SELECT version_count FROM trials WHERE nct_id=?", (nct,)).fetchone()
+                known = row["version_count"] if row and row["version_count"] is not None else 0
+                if len(fresh) <= known:
+                    return
+                try:
+                    await _fetch_new_snapshots(adapter, nct, fresh)
+                except Exception:
+                    logger.exception("failed to fetch new snapshots for %s", nct)
+                    return
+                async with changed_lock:
+                    changed.append(nct)
+
+        await asyncio.gather(*(_one(nct) for nct in ctgov_ids))
+
+    conn.close()  # ctis_mod.snapshot_pass (like load_corpus/run_pipeline) opens its own connection
+
+    if ctis_ids:
+        if "ctis" not in adapters:
+            raise ValueError("adapters['ctis'] required to check CTIS-registry trials (see ctcm.ctis.CTISAdapter)")
+        if ctis_client is None:
+            raise ValueError("ctis_client required to check CTIS-registry trials")
+        try:
+            result = await ctis_mod.snapshot_pass(ctis_ids, ctis_client)
+            changed.extend(result.stored)
+        except Exception:
+            logger.exception("failed to snapshot-check %d CTIS trial(s)", len(ctis_ids))
 
     new_findings_total = 0
     if changed:
+        conn = db.connect()
         before_all = {nct: _findings_multiset(conn, nct) for nct in changed}
         conn.close()  # load_corpus()/run_pipeline() open their own connections
 
@@ -331,6 +398,6 @@ async def check_updates(nct_ids: list[str], adapter: RegistryAdapter) -> Monitor
                 _log_new_finding(now, row)
             new_findings_total += len(new_rows)
         conn.commit()
+        conn.close()
 
-    conn.close()
     return MonitorResult(checked=len(nct_ids), changed=changed, new_findings=new_findings_total)

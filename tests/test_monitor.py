@@ -1,7 +1,8 @@
 """Runnable check for ctcm/monitor.py's non-network logic: version-count diff,
 new-snapshot fetch into the cache layout, content-hash new-finding detection,
-first_seen_at reconciliation, and monitor_log.jsonl line shape. Fake adapter
-throughout -- no real HTTP calls (mirrors tests/test_ingest.py's MockTransport
+first_seen_at reconciliation, monitor_log.jsonl line shape, and (task15-review.md
+Important #1) registry-based routing between the CT.gov and CTIS check paths. Fake
+adapter throughout -- no real HTTP calls (mirrors tests/test_ingest.py's MockTransport
 approach, but the adapter protocol here doesn't need httpx at all)."""
 
 import asyncio
@@ -128,7 +129,7 @@ def test_check_updates_no_op_when_history_length_matches_known_count(tmp_path, m
         snapshots={},
     )
 
-    result = asyncio.run(monitor.check_updates(["NCT1", "NCT2"], adapter))
+    result = asyncio.run(monitor.check_updates(["NCT1", "NCT2"], {"ctgov": adapter}))
 
     assert result == monitor.MonitorResult(checked=2, changed=[], new_findings=0)
     assert adapter.fetch_calls == []  # no history length grew -- never fetch a snapshot
@@ -157,7 +158,7 @@ def test_check_updates_detects_new_version_and_fetches_only_the_missing_snapshot
         snapshots={("NCT1", 1): _raw("Time to recovery")},
     )
 
-    result = asyncio.run(monitor.check_updates(["NCT1", "NCT2"], adapter))
+    result = asyncio.run(monitor.check_updates(["NCT1", "NCT2"], {"ctgov": adapter}))
 
     assert result.checked == 2
     assert result.changed == ["NCT1"]  # NCT2's history length matches what's already known -- untouched
@@ -188,7 +189,7 @@ def test_check_updates_new_finding_gets_first_seen_at_preexisting_stays_null(tmp
         snapshots={("NCT1", 1): _raw("Time to recovery")},
     )
 
-    result = asyncio.run(monitor.check_updates(["NCT1", "NCT2"], adapter))
+    result = asyncio.run(monitor.check_updates(["NCT1", "NCT2"], {"ctgov": adapter}))
     assert result.new_findings == 1
 
     conn = db.connect()
@@ -227,7 +228,7 @@ def test_check_updates_logs_one_new_finding_line_with_expected_shape(tmp_path, m
         snapshots={("NCT1", 1): _raw("Time to recovery")},
     )
 
-    asyncio.run(monitor.check_updates(["NCT1", "NCT2"], adapter))
+    asyncio.run(monitor.check_updates(["NCT1", "NCT2"], {"ctgov": adapter}))
 
     lines = (tmp_path / "monitor_log.jsonl").read_text().strip().splitlines()
     assert len(lines) == 1  # NCT2 produced no new finding -- only NCT1's logged
@@ -238,6 +239,77 @@ def test_check_updates_logs_one_new_finding_line_with_expected_shape(tmp_path, m
     assert entry["from_version"] == 0
     assert entry["to_version"] == 1
     assert entry["severity"] in ("SIGNAL", "CONTEXT")
+
+
+# ---- regression: task15-review.md Important #1 (registry-based routing) ----------------
+
+
+def test_check_updates_routes_ctgov_and_ctis_ids_to_their_own_check_only(tmp_path, monkeypatch):
+    """A mixed corpus (trials.registry: 'ctgov' default vs 'ctis') must route each id to
+    its own check path: a CTIS ct-number must never reach the ctgov adapter (which would
+    build a garbage /api/int/studies/{ct-number}/history URL against ClinicalTrials.gov),
+    and a CTIS id's real check is ctcm.ctis.snapshot_pass -- batched once over every ctis
+    id present -- not CTISAdapter's own (local-only) list_versions/fetch_version."""
+    _patch_config(tmp_path, monkeypatch)
+    _seed_trial("NCT1", [(0, "2020-01-05", [], _raw("Overall survival"))])
+    load_corpus()
+
+    conn = db.connect()
+    monitor.ctis_mod.ensure_schema(conn)
+    conn.execute("INSERT INTO trials(nct_id, version_count, registry) VALUES ('2025-000000-11-00', 1, 'ctis')")
+    conn.commit()
+    conn.close()
+
+    class RaisesOnNonNctId:
+        """Stand-in for CTGovAdapter: raising on a non-NCT id makes 'a CTIS id never
+        builds a CT.gov URL' a concrete, self-checking assertion rather than an inference
+        from call logs."""
+
+        async def list_versions(self, nct_id):
+            assert nct_id.startswith("NCT"), f"ctgov adapter must never see a non-NCT id, got {nct_id!r}"
+            return [{"version": 0, "date": "2020-01-05", "labels": []}]  # matches known count -- a no-op for NCT1
+
+        async def fetch_version(self, nct_id, version):
+            raise AssertionError("fetch_version must never be called in this no-op scenario")
+
+    snapshot_calls: list[list[str]] = []
+
+    async def fake_snapshot_pass(ct_numbers, client):
+        snapshot_calls.append(list(ct_numbers))
+        return monitor.ctis_mod.SnapshotResult(checked=len(ct_numbers), stored=list(ct_numbers), skipped=[], failed=[])
+
+    monkeypatch.setattr(monitor.ctis_mod, "snapshot_pass", fake_snapshot_pass)
+
+    result = asyncio.run(
+        monitor.check_updates(
+            ["NCT1", "2025-000000-11-00"],
+            {"ctgov": RaisesOnNonNctId(), "ctis": monitor.ctis_mod.CTISAdapter()},
+            ctis_client=object(),  # never dereferenced -- snapshot_pass is faked above
+        )
+    )
+
+    assert snapshot_calls == [["2025-000000-11-00"]]  # only the ctis id, batched once, reached the ctis check
+    assert result.checked == 2
+    assert "2025-000000-11-00" in result.changed  # snapshot_pass reported it "stored" -> counts as changed
+    assert "NCT1" not in result.changed  # ctgov adapter reported no history growth -- untouched
+
+
+def test_check_updates_requires_ctis_adapter_and_client_for_ctis_ids(tmp_path, monkeypatch):
+    """Fail loud, not silent, if a caller forgets to wire CTIS support for a corpus that
+    actually contains CTIS trials (CLAUDE.md SS6: errors surface, not swallowed)."""
+    _patch_config(tmp_path, monkeypatch)
+    conn = db.connect()
+    monitor.ctis_mod.ensure_schema(conn)
+    conn.execute("INSERT INTO trials(nct_id, version_count, registry) VALUES ('2025-000000-11-00', 1, 'ctis')")
+    conn.commit()
+    conn.close()
+
+    try:
+        asyncio.run(monitor.check_updates(["2025-000000-11-00"], {"ctgov": object()}))
+        raised = False
+    except ValueError:
+        raised = True
+    assert raised  # no adapters['ctis'] and no ctis_client -- must not silently no-op or crash obscurely
 
 
 # ---- regression: task14-review.md Critical #1 (mid-trial fetch failure) -----------------
@@ -263,7 +335,7 @@ def test_check_updates_retries_after_a_mid_trial_fetch_failure(tmp_path, monkeyp
         fail={("NCT1", 1)},
     )
 
-    result = asyncio.run(monitor.check_updates(["NCT1"], flaky))
+    result = asyncio.run(monitor.check_updates(["NCT1"], {"ctgov": flaky}))
 
     assert result.changed == []  # the failure must keep this pass a no-op for NCT1
     assert flaky.fetch_calls == [("NCT1", 1)]  # v0 already cached (skipped); v2 never attempted -- v1 raised first
@@ -283,7 +355,7 @@ def test_check_updates_retries_after_a_mid_trial_fetch_failure(tmp_path, monkeyp
         versions={"NCT1": fresh_versions},
         snapshots={("NCT1", 1): _raw("Time to recovery"), ("NCT1", 2): _raw("Time to recovery, final")},
     )
-    result2 = asyncio.run(monitor.check_updates(["NCT1"], healthy))
+    result2 = asyncio.run(monitor.check_updates(["NCT1"], {"ctgov": healthy}))
 
     assert result2.changed == ["NCT1"]
     assert healthy.fetch_calls == [("NCT1", 1), ("NCT1", 2)]
