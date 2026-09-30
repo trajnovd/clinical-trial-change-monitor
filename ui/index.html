@@ -1,176 +1,387 @@
 <!doctype html>
 <!--
-  Redline — timeline scrubber prototype (Task 11).
-  Single self-contained file: vanilla HTML/CSS/JS, no build step, no external CDNs.
+  Redline — Clinical Trial Registry Change Monitor (v0.7, production surface).
+  Single self-contained file: vanilla HTML/CSS/JS, no build step. Fonts load from
+  Google Fonts (IBM Plex, the brand type system); everything else is inline and the
+  stacks fall back to system faces offline.
 
-  Design tokens (see ui-report.md for full rationale):
-    Palette   --paper #EDF0F0 · --paper-raised #FFFFFF · --ink #171B1F · --ink-muted #5B6570
-              --accent #21508C (registry stamp blue) · --flag #9C2B3B (redline brick red)
-    Type      --mono  (registry IDs, dates, version tags — the "case-file" voice)
-              --sans  (prose — outcome text, headings)
-    Layout    Document/ledger metaphor: masthead strip, ruled table, case-report cards.
-    Signature The scrubber: a ruler-like track with true-to-date reference lines (dashed)
-              and evenly spaced, keyboard- and drag-operable version nodes.
+  Design tokens — Redline brand palette:
+    Palette   --ink #12100E (backgrounds, warm near-black) · --paper #F5F1EA (text)
+              --redline #C4302B (changed or removed text ONLY — nothing else)
+              --meta #8A8378 (dates, NCT IDs, small labels) · --rule #3A352E (hairlines)
+    Type      IBM Plex throughout. Serif 400 −0.02em (headlines) · Mono (all registry
+              data, outcome text, dates, NCT IDs — monospace signals verbatim record)
+              Sans (body and interface). Metadata lines: Mono, uppercase, .14em, --meta.
+    Layout    Document/ledger metaphor on ink: ruled masthead, hairline-framed table,
+              case-record cards. 2px radii, no pills.
+    Signature The logotype "Redline" set in Plex Serif and struck through in Redline
+              red — the brand name rendered as redlined text. Red appears only where
+              record text changed: diff marks, removed outcomes, signal markers,
+              the masthead counter.
     Motion    One moment only — word-diff marks (<ins>/<del>) fade in when the selection
               changes; respects prefers-reduced-motion.
 
-  Data-access seam: the ENTIRE app reads trial data through getTrial(nctId) and
-  fetchIndex(params) below. Both call the v0.6 API (ctcm/api.py) first; if the fetch
-  fails (e.g. this file opened directly as file://, no server), they fall back to the
-  embedded TRIAL_DATA constant so the file still demos standalone.
+  v0.8 — what changed from v0.7 (the app-shell pass):
+    Shell       One persistent sidebar (brand, section nav, live/demo status, theme
+                toggle) rendered once; views swap inside #view. Sections: Dashboard
+                (hero + corpus stats + notable cases + latest changes), Trials (the
+                filterable ledger), Changes (the /api/changes monitoring feed, a new
+                surface), Analytics. Old "#/?filter=" drill links still land on the
+                ledger via the router's query-param fallback.
+    Motion      View transitions, staggered card/row reveals and analytics bar growth
+                are CSS animations gated behind prefers-reduced-motion; the dashboard
+                counter counts up once. The v0.7 word-diff reveal is unchanged.
+    Hero        A three.js "corpus field" behind the dashboard headline — drifting
+                strokes of the record, a few struck in red. Loaded from the CDN at
+                runtime, decorative only: offline, no-WebGL and reduced-motion all
+                degrade to the same static panel.
+    v0.7's Vocabulary and States rules are unchanged: label() is still the only
+    enum→English seam, and every view still has a loading line and an error line
+    that names the endpoint that failed and offers a retry.
+
+  Data-access seam: the ENTIRE app reads through getTrial / fetchIndex / fetchMeta /
+  fetchAnalytics below. Whether an API exists at all is probed once (/healthz, see
+  checkApiAvailable) — no server means DEMO mode on the embedded TRIAL_DATA, so this
+  file still demos standalone from file://. A server that answers /healthz but fails
+  a data endpoint is a real failure and is reported as one, never masked with DEMO
+  data pretending to be the corpus.
 -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Redline — Clinical Trial Registry Change Monitor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;family=IBM+Plex+Serif:wght@400&amp;display=swap">
 <style>
+  /* Token semantics: --paper is always the foreground, --ink always the ground —
+     light mode is a MECHANICAL INVERSION of the same palette, not a new one, so the
+     two swap VALUES while every rule below keeps reading the same token names. */
   :root {
-    --paper: #EDF0F0;
-    --paper-raised: #FFFFFF;
-    --ink: #171B1F;
-    --ink-muted: #5B6570;
-    --line: #C7CDD2;
-    --accent: #21508C;
-    --accent-soft: #DCE6F2;
-    --flag: #9C2B3B;
-    --flag-soft: #F3DEE1;
-    --neutral-soft: #E4E7E7;
-    --focus: #21508C;
-    --radius: 8px;
-    --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, "Liberation Mono", monospace;
-    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --ink: #12100E;      /* backgrounds — warm near-black, never #000 */
+    --paper: #F5F1EA;    /* primary text on ink — warm off-white, never #FFF */
+    --redline: #C4302B;  /* changed or removed text only. Nothing else. */
+    --meta: #8A8378;     /* dates, NCT IDs, small uppercase labels */
+    --rule: #3A352E;     /* dividers, hairlines, frame borders */
+    --raised: #1A1712;   /* card surface: ink lifted one step (derived, paper over ink) */
+    --hover: #211D16;    /* row/card hover: one step above raised */
+    --radius: 2px;
+    --serif: "IBM Plex Serif", Georgia, "Times New Roman", serif;
+    --sans: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --paper: #15191C;
-      --paper-raised: #1D2327;
-      --ink: #E8ECEE;
-      --ink-muted: #97A2A9;
-      --line: #343C41;
-      --accent: #7FAEE6;
-      --accent-soft: #22344A;
-      --flag: #E2909B;
-      --flag-soft: #3D232A;
-      --neutral-soft: #262C2F;
-      --focus: #7FAEE6;
-    }
+  /* Light: page takes the warm paper, text takes the old ground; --meta darkens
+     rather than inverts so it still holds contrast on paper; red never changes —
+     it still only ever means "this changed". --raised is the second ground. */
+  :root[data-theme="light"] {
+    --ink: #F5F1EA;
+    --paper: #12100E;
+    --meta: #6E675C;
+    --rule: #D8D1C4;
+    --raised: #EAE3D6;
+    --hover: #E2D9C7;
   }
 
   * { box-sizing: border-box; }
-  html { color-scheme: light dark; }
+  html { color-scheme: dark; }
+  html[data-theme="light"] { color-scheme: light; }
   body {
     margin: 0;
-    background: var(--paper);
-    color: var(--ink);
+    background: var(--ink);
+    color: var(--paper);
     font-family: var(--sans);
-    line-height: 1.5;
+    font-size: 1rem;
+    line-height: 1.55;
     -webkit-font-smoothing: antialiased;
   }
-  h1, h2, h3 { font-weight: 700; margin: 0; }
+  h1, h2, h3 { font-weight: 400; margin: 0; }
   p { margin: 0; }
-  a { color: var(--accent); }
+  a { color: var(--paper); text-decoration-color: var(--meta); text-underline-offset: 3px; }
+  a:hover { text-decoration-color: var(--paper); }
   ul { margin: 0; padding: 0; list-style: none; }
   button { font: inherit; color: inherit; }
   .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  ::selection { background: var(--paper); color: var(--ink); }
 
   :focus { outline: none; }
   :focus-visible {
-    outline: 3px solid var(--focus);
+    outline: 2px solid var(--paper);
     outline-offset: 2px;
-    border-radius: 3px;
+    border-radius: var(--radius);
   }
 
-  /* ---------- topbar (shared) ---------- */
-  .topbar {
+  /* metadata voice — Plex Mono, small, uppercase, letterspaced .14em, Metadata grey */
+  .eyebrow, .case-studies-heading, .analytics-section-title,
+  table.ledger th, .card-label, .ref-label, .status-pill, .back-link,
+  .low-n-tag, .pub-tier, .primary-extra-item .badge, .side-nav a,
+  .stat-label, .corpus-status, .hero-cta, .change-stamp {
+    font-family: var(--mono);
+    font-weight: 400;
+    font-size: .68rem;
+    text-transform: uppercase;
+    letter-spacing: .14em;
+    color: var(--meta);
+  }
+
+  /* ---------- app shell: persistent sidebar + scrolling content ---------- */
+  .shell { display: flex; min-height: 100vh; }
+  .sidebar {
+    position: sticky;
+    top: 0;
+    align-self: flex-start;
+    height: 100vh;
+    width: 14.5rem;
+    flex: 0 0 14.5rem;
     display: flex;
-    align-items: baseline;
-    gap: .75rem;
-    padding: 1rem 1.5rem;
-    border-bottom: 1px solid var(--line);
-    background: var(--paper-raised);
+    flex-direction: column;
+    padding: 1.4rem 1.2rem 1.2rem;
+    border-right: 1px solid var(--rule);
+    background: var(--ink);
   }
+  /* the logotype IS a redline: the brand name struck through in Redline red */
   .brand {
-    font-family: var(--mono);
-    font-weight: 700;
-    font-size: 1.05rem;
-    letter-spacing: .02em;
-    color: var(--ink);
-    text-decoration: none;
+    font-family: var(--serif);
+    font-size: 1.3rem;
+    letter-spacing: -.02em;
+    color: var(--paper);
+    text-decoration: line-through;
+    text-decoration-color: var(--redline);
+    text-decoration-thickness: .09em;
   }
-  .brand:hover { color: var(--accent); }
+  .brand:hover { opacity: .8; }
   .brand-sub {
-    font-size: .8rem;
-    color: var(--ink-muted);
+    display: block;
+    margin-top: .45rem;
+    font-size: .78rem;
+    line-height: 1.45;
+    color: var(--meta);
   }
-  .topbar-nav { margin-left: auto; display: flex; gap: 1.2rem; }
-  .topbar-nav a {
-    font-family: var(--mono);
-    font-size: .82rem;
+  .side-nav { display: flex; flex-direction: column; gap: .15rem; margin-top: 2.2rem; }
+  .side-nav a {
+    display: block;
+    padding: .55rem .7rem;
+    border-radius: var(--radius);
+    border-left: 2px solid transparent;
     text-decoration: none;
-    color: var(--ink-muted);
   }
-  .topbar-nav a:hover { color: var(--accent); }
+  .side-nav a:hover { color: var(--paper); background: var(--raised); }
+  /* active section: paper edge, never red — red still only means "this changed" */
+  .side-nav a.active { color: var(--paper); background: var(--raised); border-left-color: var(--paper); }
+  .sidebar-foot {
+    margin-top: auto;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: .7rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--rule);
+  }
+  .corpus-status .dot {
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--meta);
+    margin-right: .45rem;
+    vertical-align: 1px;
+  }
+  .corpus-status.live .dot { background: var(--paper); }
+  .theme-toggle {
+    font-family: var(--mono);
+    font-size: .68rem;
+    text-transform: uppercase;
+    letter-spacing: .14em;
+    color: var(--meta);
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+  }
+  .theme-toggle:hover { color: var(--paper); }
+  .content { flex: 1; min-width: 0; }
 
   main { max-width: 78rem; margin: 0 auto; padding: 2rem 1.5rem 4rem; }
 
-  /* ---------- index view ---------- */
-  .masthead { padding: .5rem 0 2rem; border-bottom: 1px solid var(--line); margin-bottom: 1.75rem; }
-  .eyebrow {
-    font-family: var(--mono);
-    font-size: .78rem;
-    text-transform: uppercase;
-    letter-spacing: .12em;
-    color: var(--ink-muted);
-    margin-bottom: .6rem;
+  /* ---------- dashboard: hero (the corpus field), stat register, latest changes ---------- */
+  .hero {
+    position: relative;
+    overflow: hidden;
+    border: 1px solid var(--rule);
+    border-radius: var(--radius);
+    background: var(--raised);
+    padding: clamp(2.4rem, 6vw, 3.6rem) clamp(1.2rem, 4vw, 2.4rem);
+    margin-bottom: 1.6rem;
   }
-  .masthead h1 {
-    font-size: clamp(1.4rem, 2.6vw, 2rem);
+  .hero-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; pointer-events: none; }
+  .hero-content { position: relative; max-width: 46rem; }
+  .hero h1 {
+    font-family: var(--serif);
+    letter-spacing: -.02em;
+    font-size: clamp(1.6rem, 3.4vw, 2.5rem);
     line-height: 1.25;
-    max-width: 42rem;
+  }
+  .hero h1 .counter { font-family: var(--mono); color: var(--redline); }
+  .hero .tagline { margin-top: .9rem; color: var(--meta); font-size: .95rem; }
+  .hero-cta {
+    display: inline-block;
+    margin-top: 1.5rem;
+    padding: .55rem .95rem;
+    border: 1px solid var(--meta);
+    border-radius: var(--radius);
+    color: var(--paper);
+    text-decoration: none;
+  }
+  .hero-cta:hover { background: var(--paper); border-color: var(--paper); color: var(--ink); }
+
+  .stat-register {
+    display: flex;
+    flex-wrap: wrap;
+    border-top: 1px solid var(--rule);
+    border-bottom: 1px solid var(--rule);
+    margin-bottom: 2.2rem;
+  }
+  .stat { flex: 1 1 10rem; padding: 1.05rem 1.2rem 1.15rem; border-right: 1px solid var(--rule); }
+  .stat:last-child { border-right: 0; }
+  .stat-value { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 1.55rem; font-weight: 600; }
+  .stat-label { display: block; margin-top: .25rem; }
+
+  .changes-list { display: flex; flex-direction: column; }
+  .change-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: .4rem .9rem;
+    padding: .8rem .2rem;
+    border-bottom: 1px solid var(--rule);
+  }
+  .change-row:last-child { border-bottom: 0; }
+  .change-when { font-family: var(--mono); font-size: .75rem; color: var(--meta); min-width: 6.5rem; }
+  .change-row .cell-sub { flex-basis: 100%; margin: 0; }
+  .dash-changes { margin-bottom: 2rem; }
+  .dash-changes .case-studies-heading { margin-bottom: .3rem; }
+
+  /* compact masthead for section pages (Trials / Changes) — the dashboard hero
+     carries the full-size headline now */
+  .view-head { padding-bottom: 1.4rem; margin-bottom: 1.5rem; }
+  .view-head h1 { font-size: clamp(1.35rem, 2.4vw, 1.8rem); }
+
+  /* ---------- index view ---------- */
+  .masthead { padding: .75rem 0 2.2rem; border-bottom: 1px solid var(--rule); margin-bottom: 1.75rem; }
+  .eyebrow { margin-bottom: .9rem; }
+  .masthead h1 {
+    font-family: var(--serif);
+    letter-spacing: -.02em;
+    font-size: clamp(1.6rem, 3.4vw, 2.5rem);
+    line-height: 1.25;
+    max-width: 46rem;
   }
   .masthead h1 .counter {
     font-family: var(--mono);
-    color: var(--accent);
+    color: var(--redline);
   }
-  .tagline { margin-top: .75rem; color: var(--ink-muted); font-size: .95rem; }
+  .tagline { margin-top: .9rem; color: var(--meta); font-size: .95rem; }
 
+  /* ---------- filter bar (v0.7): four selects + search on one row, picks
+     accumulate into the removable token row beneath ---------- */
   .filters {
     display: flex;
     flex-wrap: wrap;
-    gap: .8rem 1.4rem;
-    margin-bottom: 1.5rem;
+    align-items: center;
+    gap: .55rem;
+    margin-bottom: .8rem;
   }
-  .filter-group { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; }
-  .filter-label {
-    font-family: var(--mono);
-    font-size: .72rem;
-    text-transform: uppercase;
-    letter-spacing: .08em;
-    color: var(--ink-muted);
-    margin-right: .15rem;
+  /* even flex-basis, not native auto width: a select sized by its longest option
+     (e.g. a 40-char CTIS sponsor class) wrecks the row's rhythm and pushes the
+     search field onto its own line. The popup still shows full option text. */
+  .select-wrap { position: relative; display: inline-flex; flex: 0 1 11rem; min-width: 8rem; }
+  .select-wrap::after {
+    content: "▾";
+    position: absolute;
+    right: .55rem;
+    top: 50%;
+    transform: translateY(-50%);
+    pointer-events: none;
+    color: var(--meta);
+    font-size: .7rem;
   }
-  .chip {
+  .filter-select {
+    width: 100%;
+    text-overflow: ellipsis;
+    font: inherit;
     font-family: var(--mono);
-    font-size: .8rem;
-    padding: .3rem .7rem;
-    border: 1px solid var(--line);
-    border-radius: 999px;
-    background: var(--paper-raised);
+    font-size: .78rem;
+    padding: .4rem 1.7rem .4rem .65rem;
+    border: 1px solid var(--rule);
+    border-radius: var(--radius);
+    background: var(--raised);
+    color: var(--paper);
+    -webkit-appearance: none;
+    appearance: none;
     cursor: pointer;
   }
-  .chip:hover { border-color: var(--accent); }
-  .chip[aria-pressed="true"] {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
+  .filter-select:hover { border-color: var(--meta); }
+  .filter-select option { background: var(--ink); color: var(--paper); }
+
+  .chip {
+    font-family: var(--mono);
+    font-size: .78rem;
+    padding: .3rem .65rem;
+    border: 1px solid var(--rule);
+    border-radius: var(--radius);
+    background: transparent;
+    color: var(--paper);
+    cursor: pointer;
   }
-  /* sponsor-chip: a single active exact-match filter (not a toggle in a fixed
-     vocabulary like the other chips) -- always shown pressed, cleared via its own
-     link rather than a click-to-toggle handler. */
-  .sponsor-chip { cursor: default; display: inline-flex; align-items: center; gap: .4rem; }
-  .sponsor-chip a { color: inherit; text-decoration: none; font-weight: 700; }
-  .sponsor-chip a:hover { opacity: .7; }
+  .chip:hover { border-color: var(--meta); }
+  .chip[aria-pressed="true"] {
+    background: var(--paper);
+    border-color: var(--paper);
+    color: var(--ink);
+  }
+  /* active-filter tokens: the pressed-chip inversion, plus the affordance that
+     clicking one removes it. Empty row collapses -- no tokens, no second row. */
+  .filter-tokens { display: flex; flex-wrap: wrap; gap: .4rem; margin-bottom: 1.4rem; }
+  .filter-tokens:empty { display: none; }
+  .token { display: inline-flex; align-items: center; gap: .45rem; }
+  .token .token-x { color: var(--meta); }
+  .token:hover .token-x { color: var(--ink); }
+
+  /* ---------- pager + export (one quiet row under the ledger) ---------- */
+  .ledger-foot { display: flex; align-items: center; flex-wrap: wrap; gap: .55rem 1rem; padding: .9rem .1rem 0; }
+  .pager { display: flex; align-items: center; gap: .55rem; }
+  .pager:empty { display: none; }
+  .export-link {
+    margin-left: auto;
+    font-family: var(--mono);
+    font-size: .72rem;
+    color: var(--meta);
+    text-decoration-color: var(--rule);
+  }
+  .export-link:hover { color: var(--paper); }
+  .pager-btn {
+    font-family: var(--mono);
+    font-size: .68rem;
+    text-transform: uppercase;
+    letter-spacing: .12em;
+    padding: .3rem .6rem;
+    border: 1px solid var(--rule);
+    border-radius: var(--radius);
+    background: transparent;
+    color: var(--paper);
+    cursor: pointer;
+  }
+  .pager-btn:hover:enabled { border-color: var(--meta); }
+  .pager-btn:disabled { color: var(--meta); opacity: .45; cursor: default; }
+  .pager-status, .pager-sep { font-family: var(--mono); font-size: .72rem; color: var(--meta); }
+
+  /* ---------- footer (all views) ---------- */
+  .site-footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule); }
+  /* metadata voice, minus the uppercasing: this line carries a sentence-long corpus
+     caveat, and .14em uppercase turns a caveat into a shout. */
+  .site-footer p { font-family: var(--mono); font-size: .72rem; line-height: 1.7; color: var(--meta); }
+  .site-footer a { color: var(--meta); }
+  .site-footer a:hover { color: var(--paper); }
 
   .search-group { flex: 1 1 16rem; display: flex; align-items: center; gap: .4rem; margin-left: auto; }
   .search-input {
@@ -178,147 +389,170 @@
     max-width: 20rem;
     font: inherit;
     font-family: var(--mono);
-    font-size: .85rem;
-    padding: .4rem .7rem;
-    border: 1px solid var(--line);
-    border-radius: 999px;
-    background: var(--paper-raised);
-    color: var(--ink);
+    font-size: .82rem;
+    padding: .4rem .65rem;
+    border: 1px solid var(--rule);
+    border-radius: var(--radius);
+    background: var(--raised);
+    color: var(--paper);
   }
-  .search-input::placeholder { color: var(--ink-muted); }
-  .search-input:focus-visible { outline: 3px solid var(--focus); outline-offset: 1px; }
+  .search-input::placeholder { color: var(--meta); }
+  .search-input:focus-visible { outline: 2px solid var(--paper); outline-offset: 1px; }
 
-  .status-note { font-size: .85rem; color: var(--ink-muted); padding: 1.5rem 0; }
+  /* loading + error lines: metadata voice (mono, --meta), sentence case because
+     these are sentences with a retry link in them. */
+  .status-note { font-family: var(--mono); font-size: .78rem; color: var(--meta); padding: 1.5rem 0; }
+  .status-note a { color: var(--paper); }
 
-  /* ---------- case studies strip ---------- */
+  /* ---------- notable cases strip ---------- */
   .case-studies { margin-bottom: 2rem; }
-  .case-studies-heading {
-    font-family: var(--mono);
-    font-size: .72rem;
-    text-transform: uppercase;
-    letter-spacing: .1em;
-    color: var(--ink-muted);
-    margin-bottom: .7rem;
-  }
+  .case-studies-heading { margin-bottom: .7rem; }
   .case-list {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(12.5rem, 1fr));
     gap: .9rem;
   }
   .case-card {
-    background: var(--paper-raised);
-    border: 1px solid var(--line);
-    border-left: 3px solid var(--flag);
+    background: var(--raised);
+    border: 1px solid var(--rule);
     border-radius: var(--radius);
-    padding: .9rem 1.05rem;
+    padding: 1rem 1.1rem;
     text-decoration: none;
     color: inherit;
     display: block;
   }
-  .case-card:hover { border-left-color: var(--accent); background: var(--accent-soft); }
-  .case-card-id { font-family: var(--mono); font-weight: 700; font-size: .82rem; }
-  .case-card-story { font-size: .85rem; margin-top: .35rem; color: var(--ink); }
-  .case-card-adjudication { font-size: .8rem; margin-top: .5rem; color: var(--ink-muted); }
-  .case-card-adjudication b { color: var(--ink); }
+  .case-card:hover { background: var(--hover); border-color: var(--meta); }
+  .case-card-id { font-family: var(--mono); font-weight: 600; font-size: .8rem; }
+  .case-card-change { display: block; margin-top: .3rem; font-size: .84rem; font-weight: 500; }
+  .case-card-story { font-size: .85rem; margin-top: .4rem; color: var(--paper); }
+  .case-card-adjudication { font-size: .8rem; margin-top: .5rem; color: var(--meta); }
+  .case-card-adjudication b { color: var(--paper); font-weight: 600; }
 
-  .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--paper-raised); }
-  table.ledger { width: 100%; border-collapse: collapse; font-size: .92rem; min-width: 46rem; }
-  table.ledger th, table.ledger td { padding: .7rem .9rem; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  .table-wrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: var(--radius); background: var(--ink); }
+  /* index ledger only (analytics tables set their own last-column width): pin the
+     column rhythm so one long condition list can't starve Change down to a
+     three-line wrap while Trial sits half empty. */
+  #ledger th:nth-child(1) { width: 32%; }
+  #ledger th:nth-child(2) { width: 22%; }
+  #ledger th:nth-child(3) { width: 21%; }
+  #ledger th:nth-child(4) { width: 8%; }
+  #ledger th:nth-child(5) { width: 17%; }
+  table.ledger { width: 100%; border-collapse: collapse; font-size: .9rem; min-width: 46rem; }
+  table.ledger th, table.ledger td { padding: .7rem .9rem; text-align: left; border-bottom: 1px solid var(--rule); }
+  table.ledger td { vertical-align: top; }
   table.ledger th {
-    font-family: var(--mono);
-    font-size: .72rem;
-    text-transform: uppercase;
-    letter-spacing: .06em;
-    color: var(--ink-muted);
+    white-space: nowrap;
     cursor: pointer;
     user-select: none;
   }
-  table.ledger th:hover { color: var(--ink); }
-  table.ledger th .sort-arrow { opacity: .5; margin-left: .2rem; }
+  table.ledger th:hover { color: var(--paper); }
+  table.ledger th .sort-arrow { opacity: .6; margin-left: .2rem; }
   table.ledger tbody tr { cursor: pointer; }
-  table.ledger tbody tr:hover { background: var(--accent-soft); }
+  table.ledger tbody tr:hover { background: var(--raised); }
   table.ledger tbody tr:last-child td { border-bottom: none; }
   .nct-link { font-family: var(--mono); font-weight: 600; }
+  /* second line of a ledger cell: conditions under the NCT id, sponsor class under
+     the sponsor name -- context, so metadata grey. */
+  .cell-sub { display: block; font-size: .78rem; color: var(--meta); margin-top: .15rem; }
+  .cell-change { display: block; margin-bottom: .25rem; }
   .tag {
     display: inline-block;
     font-family: var(--mono);
-    font-size: .72rem;
-    padding: .15rem .5rem;
-    border-radius: 4px;
+    font-size: .68rem;
+    letter-spacing: .1em;
+    padding: .15rem .45rem;
+    border-radius: var(--radius);
+    border: 1px solid var(--rule);
+    color: var(--meta);
   }
-  .tag.severity-signal { background: var(--flag-soft); color: var(--flag); }
-  .empty-row td { text-align: center; color: var(--ink-muted); padding: 2rem; white-space: normal; }
+  /* red marks changed record text; a SIGNAL is exactly that claim */
+  .tag.severity-signal { color: var(--redline); border-color: var(--redline); }
+  .empty-row td { text-align: center; color: var(--meta); padding: 2rem; white-space: normal; }
 
   /* ---------- analytics view (Task 16) ---------- */
   .analytics-table-section { margin-bottom: 2.5rem; }
-  .analytics-section-title {
-    font-family: var(--mono);
-    font-size: .82rem;
-    text-transform: uppercase;
-    letter-spacing: .08em;
-    color: var(--ink-muted);
-    margin-bottom: .8rem;
-  }
+  .analytics-section-title { margin-bottom: .35rem; }
+  /* says what the denominator is, so a rate can't be read against the wrong total */
+  .analytics-caption { font-family: var(--mono); font-size: .72rem; color: var(--meta); margin-bottom: .8rem; }
   table.analytics-table th:last-child, table.analytics-table td:last-child { width: 55%; }
   tr.drill-row { cursor: pointer; }
-  tr.drill-row:hover { background: var(--accent-soft); }
+  tr.drill-row:hover { background: var(--raised); }
   .bar-cell { display: flex; align-items: center; gap: .7rem; white-space: nowrap; }
   .bar-track {
     flex: 1;
-    height: 8px;
+    height: 7px;
     min-width: 4rem;
-    border-radius: 999px;
-    background: var(--neutral-soft);
+    background: var(--rule);
     overflow: hidden;
   }
-  .bar-fill { display: block; height: 100%; background: var(--accent); border-radius: 999px; }
-  .bar-label { font-size: .82rem; color: var(--ink-muted); }
+  .bar-fill { display: block; height: 100%; background: var(--paper); }
+  .bar-label { font-size: .8rem; color: var(--meta); }
   /* low-N (fix round 1): dimmed fill + a small tag, not a hidden row -- the group is
      real, only the rate's confidence is low. */
-  .bar-cell-low-n .bar-fill { background: var(--ink-muted); opacity: .5; }
+  .bar-cell-low-n .bar-fill { background: var(--meta); opacity: .55; }
   .low-n-tag {
-    font-family: var(--mono);
-    font-size: .64rem;
-    text-transform: uppercase;
-    letter-spacing: .04em;
-    color: var(--ink-muted);
-    border: 1px solid var(--line);
-    border-radius: 4px;
+    border: 1px solid var(--rule);
+    border-radius: var(--radius);
     padding: 0 .3rem;
     margin-left: .2rem;
   }
-  .analytics-empty-note { font-size: .85rem; color: var(--ink-muted); margin-bottom: 1rem; }
+  .analytics-empty-note { font-size: .85rem; color: var(--meta); margin-bottom: 1rem; }
 
   /* ---------- trial view ---------- */
   .back-link {
     display: inline-block;
-    font-family: var(--mono);
-    font-size: .82rem;
-    color: var(--ink-muted);
     text-decoration: none;
     margin-bottom: 1.25rem;
   }
-  .back-link:hover { color: var(--accent); }
+  .back-link:hover { color: var(--paper); }
 
-  .trial-header { padding-bottom: 1.5rem; border-bottom: 1px solid var(--line); margin-bottom: 2rem; }
-  .trial-id-row { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin-bottom: .5rem; }
-  .nct-id { font-family: var(--mono); font-weight: 700; font-size: 1.05rem; }
+  .trial-header { padding-bottom: 1.5rem; border-bottom: 1px solid var(--rule); margin-bottom: 2rem; }
+  .trial-id-row { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin-bottom: .6rem; }
+  .nct-id { font-family: var(--mono); font-weight: 600; font-size: 1rem; }
   .status-pill {
-    font-family: var(--mono);
-    font-size: .72rem;
-    text-transform: uppercase;
-    letter-spacing: .04em;
-    padding: .15rem .55rem;
-    border-radius: 4px;
-    background: var(--neutral-soft);
-    color: var(--ink-muted);
+    border: 1px solid var(--rule);
+    border-radius: var(--radius);
+    padding: .18rem .5rem;
   }
-  .trial-title { font-size: 1.4rem; margin-bottom: .3rem; }
-  .trial-official { color: var(--ink-muted); font-size: .88rem; max-width: 52rem; margin-bottom: .6rem; }
-  .trial-meta { display: flex; flex-wrap: wrap; gap: 1.4rem; font-size: .85rem; color: var(--ink-muted); }
-  .trial-meta strong { color: var(--ink); font-weight: 600; }
+  .trial-title {
+    font-family: var(--serif);
+    letter-spacing: -.02em;
+    font-size: clamp(1.3rem, 2.6vw, 1.7rem);
+    line-height: 1.3;
+    margin-bottom: .35rem;
+  }
+  .trial-official { color: var(--meta); font-size: .88rem; max-width: 52rem; margin-bottom: .7rem; }
+  .trial-meta { display: flex; flex-wrap: wrap; gap: 1.4rem; font-size: .85rem; color: var(--meta); }
+  .trial-meta strong { color: var(--paper); font-weight: 500; }
 
-  /* the scrubber: signature element */
+  /* headline finding: the one sentence this page exists to make. Frame stays
+     rule-grey -- red is reserved for the Signal tag inside it (changed record
+     text), never for chrome around it. */
+  .finding-banner {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: .5rem .7rem;
+    padding: .95rem 1.1rem;
+    margin-bottom: 1.5rem;
+    background: var(--raised);
+    border: 1px solid var(--rule);
+    border-radius: var(--radius);
+  }
+  .finding-change { font-weight: 600; }
+  .finding-timing { color: var(--meta); font-size: .85rem; }
+  .finding-rationale { flex-basis: 100%; font-size: .88rem; }
+  .finding-banner .case-card-adjudication { flex-basis: 100%; margin: 0; }
+
+  .diff-legend {
+    text-align: right;
+    font-family: var(--mono);
+    font-size: .7rem;
+    color: var(--meta);
+    margin-bottom: .5rem;
+  }
+
+  /* the scrubber: a ruler over the record's public history */
   .scrubber { margin-bottom: 1.5rem; }
   .scrubber-scroll { overflow-x: auto; padding: 0 .25rem; }
   .scrubber-track {
@@ -331,27 +565,23 @@
   .timeline-baseline {
     position: absolute;
     left: 6%; right: 6%; top: 58px;
-    height: 2px;
-    background: var(--line);
+    height: 1px;
+    background: var(--rule);
   }
   .ref-line {
     position: absolute;
     top: 14px; bottom: 14px;
     width: 0;
-    border-left: 2px dashed var(--ink-muted);
-    transform: translateX(-1px);
+    border-left: 1px dashed var(--meta);
+    transform: translateX(-.5px);
   }
   .ref-label {
     position: absolute;
     top: -2px;
     transform: translateX(-50%);
-    font-family: var(--mono);
-    font-size: .66rem;
-    text-transform: uppercase;
-    letter-spacing: .05em;
-    color: var(--ink-muted);
+    font-size: .62rem;
     white-space: nowrap;
-    background: var(--paper);
+    background: var(--ink);
     padding: 0 .3rem;
   }
   .v-marker {
@@ -365,44 +595,46 @@
   }
   .v-node {
     position: relative;
-    width: 15px; height: 15px;
+    width: 14px; height: 14px;
     border-radius: 50%;
-    border: 2px solid var(--ink);
-    background: var(--paper-raised);
+    border: 2px solid var(--meta);
+    background: var(--ink);
     cursor: pointer;
     padding: 0;
   }
-  .v-node[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); }
-  .v-node:hover { border-color: var(--accent); }
-  .v-node.has-signal { border-color: var(--flag); }
+  .v-node[aria-pressed="true"] { background: var(--paper); border-color: var(--paper); }
+  .v-node:hover { border-color: var(--paper); }
+  .v-node.has-signal { border-color: var(--redline); }
   .v-node.has-signal::after {
     content: "";
     position: absolute;
     top: -5px; right: -5px;
     width: 6px; height: 6px;
     border-radius: 50%;
-    background: var(--flag);
+    background: var(--redline);
   }
   .v-label {
     position: absolute;
     top: 20px;
     font-family: var(--mono);
-    font-size: .72rem;
-    color: var(--ink-muted);
+    font-size: .7rem;
+    color: var(--meta);
     white-space: nowrap;
   }
   .playhead {
     position: absolute;
     top: 8px; bottom: 8px;
-    width: 3px;
-    background: var(--accent);
+    width: 2px;
+    background: var(--paper);
     transform: translateX(-50%);
     pointer-events: none;
-    border-radius: 2px;
   }
   @media (prefers-reduced-motion: no-preference) {
     .playhead { transition: left .12s ease-out; }
   }
+  /* while dragging, the playhead tracks the pointer 1:1 — a transition here would
+     make it trail the cursor */
+  .scrubber-track.dragging .playhead { transition: none; }
 
   .readout {
     display: flex;
@@ -410,59 +642,72 @@
     flex-wrap: wrap;
     gap: .6rem;
     padding: .9rem 1rem;
-    background: var(--paper-raised);
-    border: 1px solid var(--line);
+    background: var(--raised);
+    border: 1px solid var(--rule);
     border-radius: var(--radius);
     margin-bottom: 2rem;
   }
-  .readout-version { font-family: var(--mono); font-weight: 700; font-size: 1.3rem; }
-  .readout-date { font-family: var(--mono); font-size: 1.05rem; color: var(--ink-muted); }
+  /* version stepper: the scrubber's affordance, restated as buttons for anyone who
+     never touches the track. */
+  .stepper {
+    font-family: var(--mono);
+    font-size: 1rem;
+    line-height: 1;
+    padding: .25rem .55rem;
+    border: 1px solid var(--rule);
+    border-radius: var(--radius);
+    background: transparent;
+    color: var(--paper);
+    cursor: pointer;
+  }
+  .stepper:hover:enabled { border-color: var(--meta); }
+  .stepper:disabled { color: var(--meta); opacity: .45; cursor: default; }
+  .readout-version { font-family: var(--mono); font-weight: 600; font-size: 1.25rem; }
+  .readout-date { font-family: var(--mono); font-size: 1rem; color: var(--meta); }
   .readout-days {
     font-family: var(--mono);
-    font-size: .82rem;
-    padding: .2rem .6rem;
-    border-radius: 4px;
-    background: var(--neutral-soft);
-    color: var(--ink-muted);
+    font-size: .78rem;
+    padding: .2rem .55rem;
+    border: 1px solid var(--rule);
+    border-radius: var(--radius);
+    color: var(--meta);
   }
-  .readout-days.after-enrolment { background: var(--accent-soft); color: var(--accent); }
-  .readout-days.after-completion { background: var(--flag-soft); color: var(--flag); }
-  .readout-status { margin-left: auto; font-size: .8rem; color: var(--ink-muted); }
+  .readout-days.after-enrolment { color: var(--paper); border-color: var(--meta); }
+  .readout-days.after-completion { background: var(--paper); border-color: var(--paper); color: var(--ink); }
+  /* results-linkage tag (ctcm/reslink.py): metadata grey on purpose -- redline red
+     is reserved for changed record text, and a results-posting edit is precisely
+     the case that is NOT an outcome switch. */
+  .readout-reslink { font-family: var(--mono); font-size: .78rem; color: var(--meta); }
+  .readout-status { margin-left: auto; font-size: .78rem; color: var(--meta); }
 
   .outcome-panel { display: grid; grid-template-columns: 1.4fr 1fr; gap: 1.5rem; align-items: start; }
   @media (max-width: 62rem) { .outcome-panel { grid-template-columns: 1fr; } }
 
   .card {
-    background: var(--paper-raised);
-    border: 1px solid var(--line);
+    background: var(--raised);
+    border: 1px solid var(--rule);
     border-radius: var(--radius);
     padding: 1.25rem 1.4rem;
   }
-  .card-label {
-    font-family: var(--mono);
-    font-size: .72rem;
-    text-transform: uppercase;
-    letter-spacing: .08em;
-    color: var(--ink-muted);
-    margin-bottom: .5rem;
-  }
-  .primary-card { border-left: 4px solid var(--accent); }
-  .primary-measure { font-size: 1.15rem; font-weight: 600; margin-bottom: .5rem; }
-  .primary-timeframe { font-family: var(--mono); font-size: .82rem; color: var(--ink-muted); margin-bottom: .8rem; }
-  .primary-description { font-size: .92rem; white-space: pre-line; }
-  .primary-extra { margin-top: 1rem; padding-top: .9rem; border-top: 1px dashed var(--line); }
-  .primary-extra-item { font-size: .85rem; margin-bottom: .3rem; }
-  .primary-extra-item .badge {
-    font-family: var(--mono);
-    font-size: .65rem;
-    text-transform: uppercase;
-    color: var(--ink-muted);
-    margin-left: .4rem;
-  }
+  .card-label { margin-bottom: .6rem; }
+  /* outcome text is registry data: mono, the verbatim-record voice. min-height
+     reserves three lines so the panel doesn't jump when a scrub step changes the
+     measure's length — a moving layout under a moving playhead reads as judder. */
+  .primary-measure { font-family: var(--mono); font-size: .98rem; font-weight: 500; line-height: 1.5; margin-bottom: .5rem; min-height: 4.5em; }
+  /* the provenance stamp under a changed outcome: metadata voice, never red.
+     Always occupies its line (visibility, not display) — same no-jump rule. */
+  .change-stamp { min-height: 1.1rem; margin-bottom: .6rem; visibility: hidden; }
+  .change-stamp.visible { visibility: visible; }
+  .primary-timeframe { font-family: var(--mono); font-size: .78rem; color: var(--meta); margin-bottom: .8rem; }
+  .primary-description { font-family: var(--mono); font-size: .84rem; line-height: 1.65; white-space: pre-line; }
+  .primary-extra { margin-top: 1rem; padding-top: .9rem; border-top: 1px dashed var(--rule); }
+  .primary-extra-item { font-family: var(--mono); font-size: .82rem; margin-bottom: .3rem; }
+  .primary-extra-item .badge { margin-left: .4rem; }
 
-  ins, del { text-decoration: none; }
-  ins { background: var(--accent-soft); color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
-  del { background: var(--flag-soft); color: var(--flag); text-decoration: line-through; }
+  /* the redline itself: red belongs to changed or removed record text, nothing else */
+  ins, del { text-decoration: none; color: var(--redline); }
+  ins { text-decoration: underline; text-decoration-color: var(--redline); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+  del { text-decoration: line-through; text-decoration-thickness: 1px; }
   @media (prefers-reduced-motion: no-preference) {
     .primary-card ins, .primary-card del,
     .secondary-list ins, .secondary-list del,
@@ -477,31 +722,31 @@
     display: flex;
     justify-content: space-between;
     gap: .8rem;
-    font-size: .85rem;
+    font-size: .8rem;
     padding: .45rem 0;
-    border-bottom: 1px solid var(--line);
+    border-bottom: 1px solid var(--rule);
   }
   .secondary-list li:last-child { border-bottom: none; }
-  .secondary-list li.is-new { background: var(--accent-soft); margin: 0 -.6rem; padding: .45rem .6rem; border-radius: 4px; border-bottom-color: transparent; }
-  .sec-measure { flex: 1; }
-  .sec-timeframe { font-family: var(--mono); color: var(--ink-muted); white-space: nowrap; font-size: .78rem; }
+  .sec-measure { flex: 1; font-family: var(--mono); }
+  .sec-timeframe { font-family: var(--mono); color: var(--meta); white-space: nowrap; font-size: .72rem; }
   .is-new .sec-measure::after {
     content: "new";
-    font-family: var(--mono);
     font-size: .62rem;
     text-transform: uppercase;
-    color: var(--accent);
+    letter-spacing: .14em;
+    color: var(--redline);
     margin-left: .5rem;
     vertical-align: middle;
   }
-  .secondary-removed { margin-top: .9rem; padding-top: .9rem; border-top: 1px dashed var(--line); }
-  .secondary-removed .card-label { color: var(--flag); }
+  .secondary-removed { margin-top: .9rem; padding-top: .9rem; border-top: 1px dashed var(--rule); }
+  .secondary-removed .card-label { color: var(--redline); }
   .secondary-removed li { border-bottom: none; padding: .2rem 0; }
 
   .deep-links {
+    font-family: var(--sans);
     margin-top: 1.5rem;
-    font-size: .85rem;
-    color: var(--ink-muted);
+    font-size: .82rem;
+    color: var(--meta);
   }
   .deep-links a { margin: 0 .2rem; }
 
@@ -510,8 +755,8 @@
   .published-reports .card-label { margin-bottom: .8rem; }
   .pub-list { display: flex; flex-direction: column; gap: .8rem; }
   .pub-row {
-    background: var(--paper-raised);
-    border: 1px solid var(--line);
+    background: var(--ink);
+    border: 1px solid var(--rule);
     border-radius: var(--radius);
     padding: .8rem 1rem;
     display: flex;
@@ -520,26 +765,67 @@
     gap: .35rem .7rem;
   }
   .pub-tier {
-    font-family: var(--mono);
-    font-size: .66rem;
-    text-transform: uppercase;
-    letter-spacing: .06em;
     padding: .15rem .5rem;
-    border-radius: 4px;
+    border-radius: var(--radius);
     white-space: nowrap;
   }
-  /* confidence gradient, not a severity signal -- HIGH earns the solid accent fill
+  /* confidence gradient, not a severity signal -- HIGH earns the solid paper fill
      used for confirmed things elsewhere on this page, LOW (10-40x noisier, see
      ctcm/publink.py) gets the least visual weight, an outline only. */
-  .pub-tier-high { background: var(--accent-soft); color: var(--accent); }
-  .pub-tier-medium { background: var(--neutral-soft); color: var(--ink); }
-  .pub-tier-low { color: var(--ink-muted); border: 1px solid var(--line); }
-  .pub-title { font-size: .92rem; flex: 1 1 16rem; }
+  .pub-tier-high { background: var(--paper); color: var(--ink); }
+  .pub-tier-medium { color: var(--paper); border: 1px solid var(--meta); }
+  .pub-tier-low { color: var(--meta); border: 1px solid var(--rule); }
+  .pub-title { font-size: .9rem; flex: 1 1 16rem; }
   .pub-title a { text-decoration: none; }
   .pub-title a:hover { text-decoration: underline; }
-  .pub-meta { font-size: .78rem; color: var(--ink-muted); }
-  .pub-oa { font-size: .7rem; color: var(--accent); }
-  .pub-timing { flex-basis: 100%; font-size: .82rem; color: var(--ink-muted); margin: .1rem 0 0; }
+  .pub-meta { font-family: var(--mono); font-size: .75rem; color: var(--meta); }
+  .pub-oa { font-family: var(--mono); font-size: .7rem; color: var(--meta); }
+  .pub-timing { flex-basis: 100%; font-size: .8rem; color: var(--meta); margin: .1rem 0 0; }
+
+  /* ---------- motion (v0.8) — all of it lives behind this one gate ---------- */
+  @media (prefers-reduced-motion: no-preference) {
+    .view-enter { animation: viewIn .38s cubic-bezier(.2, .7, .25, 1) both; }
+    @keyframes viewIn {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: none; }
+    }
+    /* stagger via the --i each renderer stamps on its cards/rows */
+    .case-card, .stat, .change-row {
+      animation: riseIn .5s cubic-bezier(.2, .7, .25, 1) backwards;
+      animation-delay: calc(var(--i, 0) * 70ms);
+    }
+    @keyframes riseIn { from { opacity: 0; transform: translateY(8px); } }
+    table.ledger tbody tr[data-nct] {
+      animation: rowIn .35s ease-out backwards;
+      animation-delay: calc(min(var(--i, 0), 14) * 30ms);
+    }
+    @keyframes rowIn { from { opacity: 0; } }
+    .bar-fill { animation: barGrow .9s cubic-bezier(.2, .7, .25, 1) backwards; }
+    @keyframes barGrow { from { width: 0; } }
+  }
+
+  /* ---------- shell collapse: sidebar becomes a sticky top bar ---------- */
+  @media (max-width: 52rem) {
+    .shell { display: block; }
+    .sidebar {
+      position: sticky;
+      top: 0;
+      z-index: 40;
+      height: auto;
+      width: auto;
+      flex-direction: row;
+      align-items: center;
+      gap: .9rem;
+      padding: .7rem 1rem;
+      border-right: 0;
+      border-bottom: 1px solid var(--rule);
+    }
+    .brand { font-size: 1.05rem; }
+    .brand-sub, .sidebar-foot .corpus-status { display: none; }
+    .side-nav { flex-direction: row; margin: 0 0 0 auto; gap: .1rem; overflow-x: auto; }
+    .side-nav a, .side-nav a.active { border-left: 0; padding: .45rem .55rem; white-space: nowrap; }
+    .sidebar-foot { margin: 0; padding: 0; border: 0; }
+  }
 
   @media (max-width: 30rem) {
     main { padding: 1.25rem 1rem 3rem; }
@@ -552,6 +838,34 @@
 
 <script>
 "use strict";
+
+/* =========================================================================
+   0. THEME — dark is the brand default; light is the same palette mechanically
+      inverted (see the :root[data-theme="light"] token block). Explicit choice
+      persists in localStorage; with no choice saved, follow the OS.
+   ========================================================================= */
+  function applyTheme(theme) {
+    document.documentElement.dataset.theme = theme;
+  }
+  applyTheme(
+    localStorage.getItem("theme") ||
+    (window.matchMedia && matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark")
+  );
+  // One delegated listener: the topbar re-renders with every view, per-render
+  // wiring would leak or need re-attaching each time.
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest(".theme-toggle")) return;
+    const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+    localStorage.setItem("theme", next);
+    applyTheme(next);
+    const btn = document.querySelector(".theme-toggle");
+    if (btn) btn.textContent = themeToggleLabel();
+    if (heroFieldTheme) heroFieldTheme(); // the corpus field re-reads the palette tokens
+  });
+  // The control names the action, not the state: it says what clicking does.
+  function themeToggleLabel() {
+    return document.documentElement.dataset.theme === "light" ? "Dark mode" : "Light mode";
+  }
 
 /* =========================================================================
    1. DATA — trimmed real ClinicalTrials.gov history for NCT04280705 (ACTT-1).
@@ -781,36 +1095,82 @@
       real bug caught in browser verification (serving ui/ over a bare static
       server showed "No trial found for NCT04280705" instead of the DEMO row).
    ========================================================================= */
-  let apiAvailable = null;
-  async function checkApiAvailable() {
-    if (apiAvailable !== null) return apiAvailable;
-    try {
-      const res = await fetch("/healthz");
-      apiAvailable = res.ok;
-    } catch (e) {
-      apiAvailable = false;
+  // The probe PROMISE is cached, not just its result: the index fires /api/meta and
+  // /api/trials concurrently, and caching only the resolved value would let both
+  // in-flight calls miss the cache and probe /healthz twice.
+  let apiAvailable = null; // resolved value, for synchronous "are we in DEMO mode" reads
+  let apiProbe = null;
+  function checkApiAvailable() {
+    if (!apiProbe) {
+      apiProbe = fetch("/healthz")
+        .then((res) => res.ok, () => false)
+        .then((ok) => { apiAvailable = ok; return ok; });
     }
-    return apiAvailable;
+    return apiProbe;
+  }
+
+  // Once /healthz says there IS an API, a failing data endpoint is a real failure --
+  // reported with the endpoint that failed, never papered over with DEMO data. (A
+  // stale server that answers /healthz but 404s /api/meta must look broken, because
+  // it is: silently showing one embedded trial as if it were the corpus would be the
+  // worst possible lie for this particular app to tell.)
+  const DEMO_CAVEAT = "DEMO mode (no server) — showing the embedded ACTT-1 record only.";
+
+  function apiError(endpoint, why) {
+    const err = new Error(endpoint + " — " + why);
+    err.endpoint = endpoint;
+    return err;
+  }
+
+  async function apiGet(endpoint) {
+    let res;
+    try { res = await fetch(endpoint); }
+    catch (e) { throw apiError(endpoint, "no response"); }
+    if (!res.ok) throw apiError(endpoint, "HTTP " + res.status);
+    return res.json();
   }
 
   async function getTrial(nctId) {
+    if (STATIC_MODE) return staticGet("api/trials/" + encodeURIComponent(nctId) + ".json", true);
     if (await checkApiAvailable()) {
-      try {
-        const res = await fetch("/api/trials/" + encodeURIComponent(nctId));
-        if (res.ok) return res.json();
-        if (res.status === 404) return null; // the real API's honest answer
-      } catch (e) { /* network hiccup after all -- fall through to DEMO below */ }
+      const endpoint = "/api/trials/" + encodeURIComponent(nctId);
+      let res;
+      try { res = await fetch(endpoint); }
+      catch (e) { throw apiError(endpoint, "no response"); }
+      if (res.ok) return res.json();
+      if (res.status === 404) return null; // the real API's honest answer
+      throw apiError(endpoint, "HTTP " + res.status);
     }
-    return nctId === TRIAL_DATA.nctId ? TRIAL_DATA : null;
+    return nctId === TRIAL_DATA.nctId
+      ? Object.assign({}, TRIAL_DATA, { headlineFinding: demoHeadlineFinding() })
+      : null;
   }
 
-  // Index rows the DEMO fallback shows when there's no server to ask: one row,
-  // derived from TRIAL_DATA the same way the real API derives a headline finding
-  // (severity/changeType/signalVersion stand in for the pipeline's pick).
-  function demoIndexResponse() {
+  // The headline finding the pipeline would pick for TRIAL_DATA, derived once here
+  // from its severity/changeType/signalVersion and reused by both DEMO payloads --
+  // the index row and the trial view's banner must not disagree with each other.
+  function demoHeadlineFinding() {
     const sv = TRIAL_DATA.versions.find((v) => v.version === TRIAL_DATA.signalVersion);
     const days = daysBetween(sv.date, TRIAL_DATA.enrolmentStart);
-    const row = {
+    return {
+      severity: TRIAL_DATA.severity,
+      changeType: TRIAL_DATA.changeType,
+      fromVersion: 0,
+      toVersion: TRIAL_DATA.signalVersion,
+      daysAfterEnrolment: days,
+      daysAfterPrimaryCompletion: daysBetween(sv.date, TRIAL_DATA.primaryCompletion),
+      // Same sentence shape ctcm/classify.py writes, raw-enum prefix and all, so the
+      // DEMO payload exercises rationaleProse() exactly as a real rationale would.
+      rationale: TRIAL_DATA.changeType + ": '" + TRIAL_DATA.versions[0].primaryOutcomes[0].measure +
+        "' -> '" + sv.primaryOutcomes[0].measure + "' (" + days + " days after enrolment, v0->v" +
+        TRIAL_DATA.signalVersion + ").",
+      adjudication: null
+    };
+  }
+
+  // The one index row the DEMO fallback shows when there's no server to ask.
+  function demoIndexResponse() {
+    const row = Object.assign({
       nctId: TRIAL_DATA.nctId,
       sponsor: TRIAL_DATA.sponsor,
       sponsorClass: TRIAL_DATA.sponsorClass,
@@ -818,32 +1178,64 @@
       conditions: ["COVID-19"],
       overallStatus: "COMPLETED",
       enrolmentCount: null,
-      versionCount: TRIAL_DATA.versions.length,
-      severity: TRIAL_DATA.severity,
-      changeType: TRIAL_DATA.changeType,
-      daysAfterEnrolment: days,
-      daysAfterPrimaryCompletion: daysBetween(sv.date, TRIAL_DATA.primaryCompletion),
-      rationale: "Primary outcome replaced " + days + " days after enrolment began (v0 → v" + TRIAL_DATA.signalVersion + ").",
-      adjudication: null
-    };
+      versionCount: TRIAL_DATA.versions.length
+    }, demoHeadlineFinding());
     return {
       rows: [row],
       total: 1,
-      counts: { trials: 1, signalTrials: 1, postCompletionTrials: 0, caveat: "DEMO mode (no server) — showing embedded ACTT-1 data only." }
+      counts: {
+        trials: 1,
+        completedTrials: 1,
+        versionsRead: TRIAL_DATA.versions.length,
+        outcomeRecords: TRIAL_DATA.versions.reduce(
+          (n, v) => n + v.primaryOutcomes.length + v.secondaryOutcomes.length, 0),
+        signalTrials: 1,
+        // Truthful for ACTT-1: its primary-outcome change (v14, 2020-04-16) landed
+        // after enrolment began and before primary completion -- the
+        // during-the-trial branch of ctcm.reslink's strict rule.
+        strictGenuineTrials: 1,
+        postCompletionTrials: 0,
+        caveat: DEMO_CAVEAT
+      }
     };
   }
 
-  async function fetchIndex(params) {
-    if (await checkApiAvailable()) {
-      const qs = new URLSearchParams();
-      for (const [key, values] of Object.entries(params || {})) {
-        (Array.isArray(values) ? values : [values]).forEach((v) => v && qs.append(key, v));
-      }
-      try {
-        const res = await fetch("/api/trials?" + qs.toString());
-        if (res.ok) return res.json();
-      } catch (e) { /* fall through to DEMO below */ }
+  // /api/meta's shape over the single DEMO row, so the index's meta-driven code paths
+  // (masthead counts, facet selects with counts, notable cases) render identically
+  // with no server: one option per select, one card, and a total of 1 (no pager).
+  function demoMetaResponse() {
+    const index = demoIndexResponse();
+    const row = index.rows[0];
+    const facet = (value) => (value ? [{ value: value, count: 1 }] : []);
+    return {
+      counts: index.counts,
+      filters: {
+        severity: facet(row.severity),
+        changeType: facet(row.changeType),
+        sponsorClass: facet(row.sponsorClass),
+        phase: facet(row.phase)
+      },
+      caseStudies: [row]
+    };
+  }
+
+  async function fetchMeta() {
+    if (STATIC_MODE) return staticGet("api/meta.json");
+    if (await checkApiAvailable()) return apiGet("/api/meta");
+    return demoMetaResponse();
+  }
+
+  function toQueryString(params) {
+    const qs = new URLSearchParams();
+    for (const [key, values] of Object.entries(params || {})) {
+      (Array.isArray(values) ? values : [values]).forEach((v) => v && qs.append(key, v));
     }
+    return qs.toString();
+  }
+
+  async function fetchIndex(params) {
+    if (STATIC_MODE) return staticFetchIndex(params);
+    if (await checkApiAvailable()) return apiGet("/api/trials?" + toQueryString(params));
     return demoIndexResponse();
   }
 
@@ -851,27 +1243,192 @@
   // aggregations only mean something over the live corpus, and a single-trial
   // embedded fixture (TRIAL_DATA) can't stand in for a sponsor-level rate table
   // without fabricating numbers this view exists specifically to be honest about.
+  // null therefore means "DEMO mode, no analytics"; a thrown apiError means the live
+  // endpoint failed, which is a different thing the view says differently.
   async function fetchAnalytics() {
-    if (await checkApiAvailable()) {
-      try {
-        const res = await fetch("/api/analytics");
-        if (res.ok) return res.json();
-      } catch (e) { /* fall through */ }
+    if (STATIC_MODE) return staticGet("api/analytics.json");
+    if (await checkApiAvailable()) return apiGet("/api/analytics");
+    return null;
+  }
+
+  // Same DEMO stance as fetchAnalytics: the monitoring feed only means something
+  // against a live corpus a monitor pass can stamp, so null means "DEMO mode, no
+  // feed" and the views say so rather than inventing discovery dates.
+  async function fetchChanges(limit) {
+    if (STATIC_MODE) {
+      const feed = await staticGet("api/changes.json");
+      return limit && feed ? Object.assign({}, feed, { rows: (feed.rows || []).slice(0, limit) }) : feed;
     }
+    if (await checkApiAvailable()) return apiGet("/api/changes" + (limit ? "?limit=" + limit : ""));
     return null;
   }
 
 /* =========================================================================
-   3. UTILITIES — dates, escaping, word-level LCS diff.
+   2b. STATIC SNAPSHOT MODE — scripts/bake_static.py stamps window.REDLINE_STATIC
+       onto the copy of this file it ships to a dumb file host, alongside the
+       whole corpus pre-baked as JSON (api/meta.json, api/trials-index.json, one
+       api/trials/{nct}.json per trial, api/analytics.json, api/changes.json,
+       redline-trials.csv). The seam functions above route here in that mode;
+       staticApplyIndexQuery reimplements ctcm/api.py's filter contract
+       (_index_where + _index_order_by: groups OR within / AND across, exact
+       sponsor, substring q, NULLS LAST sort, nct_id tiebreak, clamped paging)
+       over the one index file. Live-server and DEMO paths are untouched.
+   ========================================================================= */
+  const STATIC_MODE = !!window.REDLINE_STATIC;
+  let staticIndexPromise = null;
+
+  async function staticGet(path, allow404) {
+    let res;
+    try { res = await fetch(path); }
+    catch (e) { throw apiError(path, "no response"); }
+    if (res.status === 404 && allow404) return null;
+    if (!res.ok) throw apiError(path, "HTTP " + res.status);
+    return res.json();
+  }
+
+  const STATIC_FILTER_KEYS = {
+    severity: "severity", change_type: "changeType",
+    sponsor_class: "sponsorClass", phase: "phase"
+  };
+
+  function staticApplyIndexQuery(all, params) {
+    const rows = all.filter((r) => {
+      for (const [param, field] of Object.entries(STATIC_FILTER_KEYS)) {
+        const wanted = params[param] || [];
+        if (wanted.length && !wanted.includes(r[field])) return false;
+      }
+      if (params.sponsor && r.sponsor !== params.sponsor) return false;
+      if (params.q) {
+        const hay = [r.nctId, r.sponsor, (r.conditions || []).join(", ")].join("\n").toLowerCase();
+        if (!hay.includes(params.q.toLowerCase())) return false;
+      }
+      return true;
+    });
+    const sort = params.sort || "-daysAfterEnrolment";
+    const dir = sort.startsWith("-") ? -1 : 1;
+    const key = sort.replace(/^-/, "");
+    rows.sort((a, b) => {
+      const av = a[key], bv = b[key];
+      if ((av == null) !== (bv == null)) return av == null ? 1 : -1; // NULLS LAST, both directions
+      if (av != null && av !== bv) return (av < bv ? -1 : 1) * dir;
+      return a.nctId < b.nctId ? -1 : a.nctId > b.nctId ? 1 : 0;
+    });
+    const limit = Math.max(1, Math.min(params.limit || 50, 200));
+    const offset = Math.max(0, params.offset || 0);
+    return { rows: rows.slice(offset, offset + limit), total: rows.length };
+  }
+
+  async function staticFetchIndex(params) {
+    if (!staticIndexPromise) staticIndexPromise = staticGet("api/trials-index.json");
+    const idx = await staticIndexPromise;
+    return Object.assign({ counts: idx.counts }, staticApplyIndexQuery(idx.rows, params || {}));
+  }
+
+/* =========================================================================
+   3. VOCABULARY — the one place an enum becomes English.
+
+      Nothing in this file prints a raw registry or pipeline enum: every screen
+      string goes through label(), and the raw value survives only in a title=
+      tooltip (labelHtml) for anyone who needs to match what they see against the
+      API or the database. Unknown values degrade in two steps: an ALL_CAPS value
+      is sentence-cased, anything already written like English (the CTIS registry
+      supplies free-text sponsor classes and statuses) passes through untouched --
+      so a new enum from the backend reads acceptably instead of shouting.
+   ========================================================================= */
+  const LABELS = {
+    changeType: {
+      POST_COMPLETION_CHANGE: "Post-completion change",
+      PRIMARY_ADDED: "Primary outcome added",
+      PRIMARY_REMOVED: "Primary outcome removed",
+      PRIMARY_REPLACED: "Primary outcome replaced",
+      PRIMARY_BROADENED: "Primary outcome broadened",
+      PRIMARY_NARROWED: "Primary outcome narrowed",
+      PRIMARY_DEMOTED: "Primary demoted to secondary",
+      SECONDARY_PROMOTED: "Secondary promoted to primary",
+      REWORDED: "Reworded",
+      TIMEPOINT_CHANGED: "Timepoint changed",
+      TIMELINE_REVISED: "Timeline revised"
+    },
+    severity: { SIGNAL: "Signal", CONTEXT: "Context" },
+    sponsorClass: {
+      INDUSTRY: "Industry", NIH: "NIH", FED: "US federal", OTHER_GOV: "Other government",
+      NETWORK: "Network", INDIV: "Individual", OTHER: "Other"
+    },
+    // Only the statuses sentence-casing gets wrong need an entry here.
+    status: { ACTIVE_NOT_RECRUITING: "Active, not recruiting", UNKNOWN: "Unknown status" },
+    concern: { LOW: "Low", MODERATE: "Moderate", HIGH: "High" }
+  };
+
+  function sentenceCase(raw) {
+    const s = String(raw).replace(/_/g, " ").trim().toLowerCase();
+    return s ? s.charAt(0).toUpperCase() + s.slice(1) : "";
+  }
+
+  function label(kind, raw) {
+    if (raw === null || raw === undefined || raw === "") return "—";
+    const map = LABELS[kind];
+    if (map && map[raw]) return map[raw];
+    return /^[A-Z0-9_]+$/.test(String(raw)) ? sentenceCase(raw) : String(raw);
+  }
+
+  // Escaped label with the raw value in title=, so the screen stays English and the
+  // underlying enum is still one hover away.
+  function labelHtml(kind, raw, className) {
+    const text = escapeHtml(label(kind, raw));
+    if (raw === null || raw === undefined || raw === "") return text;
+    return "<span" + (className ? ' class="' + className + '"' : "") +
+      ' title="' + escapeHtml(String(raw)) + '">' + text + "</span>";
+  }
+
+  function phaseLabel(p) {
+    if (!p) return "—";
+    if (p === "NA") return "N/A";
+    return p.split(",")
+      .map((x) => x.replace("EARLY_PHASE", "Early phase ").replace("PHASE", "Phase "))
+      .join(" / ");
+  }
+
+  // Facets and tokens share one labelling rule, so a dropdown option and the token
+  // it produces can never read differently.
+  function filterValueLabel(key, value) {
+    return key === "phase" ? phaseLabel(value) : label(key, value);
+  }
+
+  // The API's rationale prose (ctcm/classify.py) opens with the raw change-type
+  // enum -- "PRIMARY_ADDED: '...' added (2358 days after enrolment, v0->v3)." Every
+  // surface that shows a rationale also shows the humanized change type right next
+  // to it, so the prefix is dropped rather than translated. The rest of the sentence
+  // is the classifier's own verbatim evidence and is left exactly as written.
+  function rationaleProse(text) {
+    return String(text || "").replace(/^[A-Z][A-Z0-9_]*:\s*/, "");
+  }
+
+/* =========================================================================
+   3b. UTILITIES — dates, escaping, word-level LCS diff.
    ========================================================================= */
   function daysBetween(laterISO, earlierISO) {
     return Math.round((new Date(laterISO) - new Date(earlierISO)) / 86400000);
   }
 
+  // Exact — for mono/data surfaces (the readout pill) and title= tooltips.
   function fmtDaysAfterEnrolment(days) {
     if (days === 0) return "day enrolment began";
     if (days > 0) return "+" + days + " day" + (days === 1 ? "" : "s") + " after enrolment began";
     return Math.abs(days) + " day" + (Math.abs(days) === 1 ? "" : "s") + " before enrolment began";
+  }
+
+  // Humanized — for prose surfaces (ledger Timing cell, finding banner). A reader
+  // can hold "3.2 years" in their head; 1174 days is a number they have to convert.
+  function humanizeSpan(days) {
+    const d = Math.abs(days);
+    if (d < 90) return d + (d === 1 ? " day" : " days");
+    if (d < 730) { const m = Math.max(1, Math.round(d / 30.44)); return m + (m === 1 ? " month" : " months"); }
+    return (d / 365.25).toFixed(1) + " years";
+  }
+
+  function fmtTimingProse(days) {
+    if (days === 0) return "the day enrolment began";
+    return humanizeSpan(days) + (days > 0 ? " after enrolment began" : " before enrolment began");
   }
 
   function escapeHtml(s) {
@@ -943,49 +1500,134 @@
 
   async function route() {
     const hash = location.hash || "#/";
-    const m = hash.match(/^#\/trial\/([^/]+)/);
     activeScrubber = null; // leaving (or not yet on) the trial view disarms arrow-key scrubbing
+    if (heroFieldStop) { heroFieldStop(); heroFieldStop = null; } // leaving the dashboard stops its render loop
+    const m = hash.match(/^#\/trial\/([^/?]+)/);
     if (m) { await renderTrialView(decodeURIComponent(m[1])); return; }
     if (hash.match(/^#\/analytics/)) { await renderAnalyticsView(); return; }
-    // "#/" or "#/?sponsorClass=INDUSTRY" etc. — drill-down links from the analytics
-    // view (see analyticsDrillHref below) encode one filter as a query string after
-    // the index route; everything else lands here as the plain unfiltered index.
+    if (hash.match(/^#\/changes/)) { await renderChangesView(); return; }
+    // "#/trials", "#/trials?sponsorClass=INDUSTRY", or a pre-v0.8 drill/bookmark
+    // "#/?sponsorClass=INDUSTRY" — a query string always means the ledger, so old
+    // links keep landing on the filtered index rather than the dashboard.
     const qsIdx = hash.indexOf("?");
     const initialParams = qsIdx >= 0 ? new URLSearchParams(hash.slice(qsIdx + 1)) : null;
-    await renderIndexView(initialParams);
-  }
-
-  function topbarHtml() {
-    return (
-      '<header class="topbar">' +
-        '<a class="brand" href="#/">Redline</a>' +
-        '<span class="brand-sub">Clinical Trial Registry Change Monitor</span>' +
-        '<nav class="topbar-nav"><a href="#/analytics">Analytics</a></nav>' +
-      "</header>"
-    );
+    if (hash.match(/^#\/trials/) || initialParams) { await renderTrialsView(initialParams); return; }
+    await renderDashboardView();
   }
 
 /* =========================================================================
-   5. INDEX VIEW — filter chips/search/sort drive server-side query params
-      (api-brief: GET /api/trials?severity=&change_type=&...&sort=). One
-      unfiltered fetch on load supplies the fixed chip-value lists and the case
-      studies strip; every filter/sort/search change re-fetches just the table.
+   4a. APP SHELL — sidebar rendered once (brand, section nav, live/demo status,
+       theme toggle); every view paints into #view via setView(), which also
+       moves the nav's active state. The status line answers the question DEMO
+       mode used to leave to the footer caveat alone: which corpus am I looking
+       at, before I read a single number off it.
    ========================================================================= */
-  function phaseLabel(p) {
-    if (!p) return "—";
-    if (p === "NA") return "N/A";
-    return p.split(",").map((x) => x.replace("PHASE", "Phase ")).join(" / ");
+  const NAV_ITEMS = [
+    ["dash", "#/", "Dashboard"],
+    ["trials", "#/trials", "Trials"],
+    ["changes", "#/changes", "Changes"],
+    ["analytics", "#/analytics", "Analytics"]
+  ];
+
+  function ensureShell() {
+    if (document.getElementById("view")) return;
+    document.getElementById("app").innerHTML =
+      '<div class="shell"><aside class="sidebar">' +
+        '<div><a class="brand" href="#/">Redline</a>' +
+          '<span class="brand-sub">Clinical trial registry change monitor</span></div>' +
+        '<nav class="side-nav" aria-label="Sections">' +
+          NAV_ITEMS.map(([key, href, text]) =>
+            '<a href="' + href + '" data-nav="' + key + '">' + text + "</a>").join("") +
+        "</nav>" +
+        '<div class="sidebar-foot">' +
+          '<p class="corpus-status" id="corpus-status"><span class="dot" aria-hidden="true"></span>Probing&hellip;</p>' +
+          '<button class="theme-toggle" type="button">' + themeToggleLabel() + "</button>" +
+        "</div>" +
+      '</aside><div class="content" id="view"></div></div>';
+    if (STATIC_MODE) {
+      const el = document.getElementById("corpus-status");
+      el.classList.add("live");
+      el.innerHTML = '<span class="dot" aria-hidden="true"></span>Corpus snapshot';
+    } else {
+      checkApiAvailable().then(updateCorpusStatus);
+    }
   }
 
-  // Top SIGNAL trials by |days after primary completion| — same ranking the API
-  // uses to pick each row's headline finding, reused here to pick the strip.
-  function pickCaseStudies(rows) {
-    return rows
-      .filter((r) => r.severity === "SIGNAL" && r.rationale)
-      .slice()
-      .sort((a, b) => Math.abs(b.daysAfterPrimaryCompletion ?? -Infinity) - Math.abs(a.daysAfterPrimaryCompletion ?? -Infinity))
-      .slice(0, 5);
+  function updateCorpusStatus(ok) {
+    const el = document.getElementById("corpus-status");
+    if (!el) return;
+    el.classList.toggle("live", !!ok);
+    el.innerHTML = '<span class="dot" aria-hidden="true"></span>' + (ok ? "Live corpus" : "Demo data");
   }
+
+  function setView(navKey, html) {
+    ensureShell();
+    document.querySelectorAll(".side-nav a").forEach((a) =>
+      a.classList.toggle("active", a.dataset.nav === navKey));
+    document.getElementById("view").innerHTML = html;
+    window.scrollTo(0, 0);
+  }
+
+/* =========================================================================
+   4b. SHARED CHROME — footer, loading and error lines.
+   ========================================================================= */
+  // Last caveat /api/meta reported, so the trial and analytics views can print the
+  // corpus caveat without spending a request of their own on it. In DEMO mode the
+  // caveat is the DEMO notice itself -- which is why it lives in the footer now and
+  // not in the masthead tagline: it qualifies the whole page, not the headline.
+  let corpusCaveat = null;
+
+  function footerHtml() {
+    const caveat = apiAvailable === false ? DEMO_CAVEAT : corpusCaveat;
+    return (
+      '<footer class="site-footer"><p>' +
+        (caveat ? escapeHtml(caveat) + " · " : "") +
+        "Redline v0.8 · " +
+        '<a href="https://clinicaltrials.gov" target="_blank" rel="noopener">ClinicalTrials.gov</a>' +
+      "</p></footer>"
+    );
+  }
+
+  function loadingHtml(what) {
+    return '<p class="status-note">Loading ' + escapeHtml(what) + "…</p>";
+  }
+
+  // Names the endpoint that failed and offers to run it again -- "something went
+  // wrong" would leave the reader with nothing to do and nothing to report.
+  function errorHtml(err, retry) {
+    retryAction = retry;
+    return (
+      '<p class="status-note">Could not load <span class="mono">' +
+        escapeHtml((err && err.endpoint) || "the API") + "</span>" +
+        (err && err.message && err.endpoint ? " (" + escapeHtml(err.message.split(" — ").pop()) + ")" : "") +
+        '. <a href="#" data-retry>Try again</a></p>'
+    );
+  }
+
+  let retryAction = null;
+  document.addEventListener("click", (e) => {
+    const link = e.target.closest("[data-retry]");
+    if (!link) return;
+    e.preventDefault();
+    (retryAction || route)();
+  });
+
+/* =========================================================================
+   5. INDEX VIEW — two requests on first paint: /api/meta for the chrome
+      (headline counts, filter facets with counts, notable cases) and one page
+      of /api/trials for the ledger. Filters/search/sort/page drive server-side
+      query params (GET /api/trials?severity=&change_type=&...&sort=&limit=
+      &offset=); every change re-fetches just the table and its pager.
+
+      The facet lists come from /api/meta rather than from the rows on screen:
+      with 50 rows per page, deriving the dropdown vocabulary from the page would
+      make the available filters change every time you turned a page.
+   ========================================================================= */
+  const PAGE_SIZE = 50;
+  const FILTER_DEFS = [
+    ["severity", "Severity"], ["changeType", "Change"],
+    ["sponsorClass", "Sponsor class"], ["phase", "Phase"]
+  ];
 
   // Adjudication if present (ui-brief.md): judge's concern level + the one-line
   // rationale excerpt ctcm/api.py already trimmed to one sentence server-side.
@@ -993,27 +1635,37 @@
   // rule (global-constraints.md) is enforced upstream in ctcm/adjudicate.py's
   // _defuse(), not re-implemented here.
   function adjudicationLineHtml(adjudication) {
-    if (!adjudication || !adjudication.rationale) return "";
-    const concern = String(adjudication.concern || "").toLowerCase();
+    if (!adjudication || !adjudication.rationale || !adjudication.concern) return "";
+    const concern = label("concern", adjudication.concern).toLowerCase();
     return (
       '<p class="case-card-adjudication"><b>Adjudication:</b> ' + escapeHtml(concern) +
       " concern — " + escapeHtml(adjudication.rationale) + "</p>"
     );
   }
 
+  // The five cards come ranked from /api/meta.caseStudies -- the same ordering the
+  // API uses to pick a trial's headline finding, applied server-side over the whole
+  // corpus rather than re-derived here from whichever rows this page happens to hold.
+  function severityTagHtml(severity) {
+    if (!severity) return "";
+    return ' <span class="tag severity-' + escapeHtml(severity.toLowerCase()) + '" title="' + escapeHtml(severity) +
+      '">' + escapeHtml(label("severity", severity)) + "</span>";
+  }
+
   function caseStudiesHtml(rows) {
-    const picks = pickCaseStudies(rows);
+    const picks = rows || [];
     if (!picks.length) return "";
-    const cards = picks.map((r) =>
-      '<a class="case-card" href="#/trial/' + encodeURIComponent(r.nctId) + '">' +
-        '<span class="case-card-id mono">' + r.nctId + "</span>" +
-        '<p class="case-card-story">' + escapeHtml(r.rationale) + "</p>" +
+    const cards = picks.map((r, i) =>
+      '<a class="case-card" style="--i:' + i + '" href="#/trial/' + encodeURIComponent(r.nctId) + '">' +
+        '<span class="case-card-id mono">' + escapeHtml(r.nctId) + "</span>" +
+        labelHtml("changeType", r.changeType, "case-card-change") +
+        (r.rationale ? '<p class="case-card-story">' + escapeHtml(rationaleProse(r.rationale)) + "</p>" : "") +
         adjudicationLineHtml(r.adjudication) +
       "</a>"
     ).join("");
     return (
-      '<section class="case-studies" aria-label="Case studies">' +
-        '<p class="case-studies-heading">Case studies</p>' +
+      '<section class="case-studies" aria-label="Notable cases">' +
+        '<p class="case-studies-heading">Notable cases</p>' +
         '<div class="case-list">' + cards + "</div>" +
       "</section>"
     );
@@ -1027,6 +1679,7 @@
   // analytics sponsor row's own drill-down link, and must reproduce that row's exact
   // numerator/denominator, not a broader substring match across three columns.
   let indexSponsorFilter = "";
+  let indexOffset = 0;
   let indexRequestSeq = 0; // guards against a slow, now-superseded fetch overwriting a newer one
 
   function currentIndexParams() {
@@ -1037,112 +1690,338 @@
       phase: [...indexFilters.phase],
       sponsor: indexSponsorFilter,
       q: indexQuery,
-      sort: (indexSort.dir === -1 ? "-" : "") + indexSort.key
+      sort: (indexSort.dir === -1 ? "-" : "") + indexSort.key,
+      limit: PAGE_SIZE,
+      offset: indexOffset
     };
   }
 
-  async function refreshLedger() {
+  // Every filter/search/sort change goes through here, so page 1 is the only place a
+  // changed query can land -- "page 4 of a result set that no longer has four pages"
+  // is a state this UI simply never has.
+  async function refreshLedger(resetPage) {
+    if (resetPage !== false) indexOffset = 0;
     const seq = ++indexRequestSeq;
-    const data = await fetchIndex(currentIndexParams());
+    let data;
+    try {
+      data = await fetchIndex(currentIndexParams());
+    } catch (err) {
+      if (seq !== indexRequestSeq) return;
+      document.querySelector("#ledger tbody").innerHTML =
+        '<tr class="empty-row"><td colspan="5">' + errorHtml(err, () => refreshLedger(false)) + "</td></tr>";
+      document.getElementById("pager").innerHTML = "";
+      return;
+    }
     if (seq !== indexRequestSeq) return; // a newer request already landed
-    renderLedgerRows(data.rows);
+    paintLedger(data);
   }
 
-  async function renderIndexView(initialParams) {
-    const app = document.getElementById("app");
-    app.innerHTML = topbarHtml() + '<main class="index-view"><p class="status-note">Loading trial index…</p></main>';
+  function paintLedger(data) {
+    renderLedgerRows(data.rows);
+    document.getElementById("pager").innerHTML = pagerHtml(data.total);
+    // Same filters, no pagination: the export is the whole filtered set, so the link
+    // and the pager total can never disagree. Hidden in DEMO mode (no server to ask).
+    const exportLink = document.getElementById("export-link");
+    if (exportLink) {
+      if (STATIC_MODE) {
+        // A dumb file host can't filter a CSV, so the link is always the whole
+        // corpus and the label says so, whatever filters are on screen.
+        exportLink.href = "redline-trials.csv";
+        exportLink.textContent = "Download CSV — full corpus";
+        exportLink.hidden = false;
+      } else if (apiAvailable === false || !data.total) {
+        exportLink.hidden = true;
+      } else {
+        const params = { ...currentIndexParams() };
+        delete params.limit;
+        delete params.offset;
+        exportLink.href = "/api/export.csv?" + toQueryString(params);
+        exportLink.textContent = "Download CSV — " + data.total + " trial" + (data.total === 1 ? "" : "s");
+        exportLink.hidden = false;
+      }
+    }
+  }
 
+  // ‹ Prev · 1–50 of 721 · Next › — mono metadata voice, and nothing at all when the
+  // whole result set fits on one page (DEMO mode, narrow filters).
+  function pagerHtml(total) {
+    if (!total || total <= PAGE_SIZE) return "";
+    const start = indexOffset + 1;
+    const end = Math.min(indexOffset + PAGE_SIZE, total);
+    return (
+      '<button class="pager-btn" data-page="prev"' + (indexOffset <= 0 ? " disabled" : "") + ">&lsaquo; Prev</button>" +
+      '<span class="pager-sep" aria-hidden="true">·</span>' +
+      '<span class="pager-status">' + start + "–" + end + " of " + total + "</span>" +
+      '<span class="pager-sep" aria-hidden="true">·</span>' +
+      '<button class="pager-btn" data-page="next"' + (end >= total ? " disabled" : "") + ">Next &rsaquo;</button>"
+    );
+  }
+
+  // One row: four native selects + search. Picking an option adds a token and snaps
+  // the select back to its placeholder, so repeated picks accumulate -- multi-select
+  // without a custom dropdown widget to build, style and make keyboard-accessible.
+  function filterBarHtml(facets) {
+    const selects = FILTER_DEFS.map(([key, name]) => {
+      const options = (facets[key] || []).map((f) =>
+        '<option value="' + escapeHtml(String(f.value)) + '">' +
+          escapeHtml(filterValueLabel(key, f.value)) + " (" + f.count + ")</option>"
+      ).join("");
+      return (
+        '<span class="select-wrap"><select class="filter-select" data-filter-key="' + key +
+          '" aria-label="Add a ' + escapeHtml(name.toLowerCase()) + ' filter">' +
+          '<option value="">' + escapeHtml(name) + "</option>" + options +
+        "</select></span>"
+      );
+    }).join("");
+    return (
+      '<section class="filters" role="group" aria-label="Filter trials">' + selects +
+        '<div class="search-group">' +
+          '<input type="search" class="search-input" id="index-search" placeholder="NCT ID, sponsor, condition…" value="' +
+            escapeHtml(indexQuery) + '" aria-label="Search trials">' +
+        "</div>" +
+      "</section>"
+    );
+  }
+
+  // Active filters as removable tokens. The exact-match sponsor filter (the analytics
+  // view's drill-down) is one of them: same look, same removal, but its own key,
+  // because it must stay an exact match and not fold into the `q` substring search.
+  function activeTokens() {
+    const tokens = [];
+    FILTER_DEFS.forEach(([key]) => {
+      indexFilters[key].forEach((v) => tokens.push({ key: key, value: v, text: filterValueLabel(key, v) }));
+    });
+    if (indexSponsorFilter) tokens.push({ key: "sponsor", value: indexSponsorFilter, text: indexSponsorFilter });
+    return tokens;
+  }
+
+  function renderTokens() {
+    document.getElementById("filter-tokens").innerHTML = activeTokens().map((t) =>
+      '<button class="chip token" aria-pressed="true" data-token-key="' + t.key +
+        '" data-token-value="' + escapeHtml(t.value) +
+        '" aria-label="Remove filter ' + escapeHtml(t.text) + '" title="' + escapeHtml(t.value) + '">' +
+        escapeHtml(t.text) + '<span class="token-x" aria-hidden="true">&times;</span></button>'
+    ).join("");
+  }
+
+/* =========================================================================
+   5a. DASHBOARD — the landing view: hero (headline count over the corpus
+       field), the stat register, notable cases, and a taste of the monitoring
+       feed. Reads /api/meta and the first few /api/changes rows; the ledger
+       itself now lives one nav item over, on #/trials.
+   ========================================================================= */
+  function statRegisterHtml(counts) {
+    const stats = [
+      [counts.trials, "Trials in corpus"],
+      [counts.completedTrials, "Completed trials"],
+      [counts.versionsRead, "Versions read"],
+      [counts.outcomeRecords, "Outcome records"],
+      [counts.signalTrials, "With a signal finding"],
+      [counts.strictGenuineTrials, "Strict genuine switches"],
+      [counts.postCompletionTrials, "Changed after completion"]
+    ].filter(([v]) => v != null); // absent counts (older API, pre-reslink db) drop their tile
+    return (
+      '<section class="stat-register" aria-label="Corpus counts">' +
+        stats.map(([v, text], i) =>
+          '<div class="stat" style="--i:' + i + '"><span class="stat-value">' + v.toLocaleString("en-US") +
+          '</span><span class="stat-label">' + text + "</span></div>").join("") +
+      "</section>"
+    );
+  }
+
+  function changesRowsHtml(rows) {
+    return rows.map((r, i) =>
+      '<li class="change-row" style="--i:' + i + '">' +
+        '<span class="change-when">' + escapeHtml(String(r.firstSeenAt || "").slice(0, 10)) + "</span>" +
+        '<a class="nct-link mono" href="#/trial/' + encodeURIComponent(r.nctId) + '">' + escapeHtml(r.nctId) + "</a>" +
+        labelHtml("changeType", r.changeType, "change-what") +
+        severityTagHtml(r.severity) +
+        (r.sponsor ? '<span class="cell-sub">' + escapeHtml(r.sponsor) + "</span>" : "") +
+      "</li>").join("");
+  }
+
+  function latestChangesHtml(changes) {
+    if (!changes) return ""; // DEMO mode: no monitoring feed without a server
+    const rows = changes.rows || [];
+    const heading = "Latest changes" +
+      (changes.total > rows.length ? ' · <a href="#/changes">all ' + changes.total + "</a>" : "");
+    const body = rows.length
+      ? '<ul class="changes-list">' + changesRowsHtml(rows) + "</ul>"
+      : '<p class="analytics-empty-note">No monitor pass has recorded a new change yet — new registry edits appear here as the monitor sees them.</p>';
+    return (
+      '<section class="dash-changes" aria-label="Latest changes">' +
+        '<p class="case-studies-heading">' + heading + "</p>" + body +
+      "</section>"
+    );
+  }
+
+  async function renderDashboardView() {
+    setView("dash", "<main>" + loadingHtml("the dashboard") + "</main>");
+    let meta, changes;
+    try {
+      [meta, changes] = await Promise.all([fetchMeta(), fetchChanges(4)]);
+    } catch (err) {
+      setView("dash", '<main class="view-enter">' + errorHtml(err, route) + footerHtml() + "</main>");
+      return;
+    }
+    const counts = meta.counts || {};
+    corpusCaveat = counts.caveat || null;
+    const changed = counts.signalTrials || 0;
+
+    setView("dash",
+      '<main class="view-enter dash-view">' +
+        '<section class="hero">' +
+          '<canvas class="hero-canvas" id="hero-canvas" aria-hidden="true"></canvas>' +
+          '<div class="hero-content">' +
+            '<p class="eyebrow">Registry change monitor</p>' +
+            '<h1><span class="counter" id="hero-counter">' + changed + "</span> trial" + (changed === 1 ? "" : "s") +
+              " changed " + (changed === 1 ? "its" : "their") + " primary outcome after enrolment began</h1>" +
+            '<p class="tagline">Every version was public the entire time. Redline reads the registry&rsquo;s own history and marks what moved.</p>' +
+            '<a class="hero-cta" href="#/trials">Browse the index &rarr;</a>' +
+          "</div>" +
+        "</section>" +
+        statRegisterHtml(counts) +
+        caseStudiesHtml(meta.caseStudies) +
+        latestChangesHtml(changes) +
+        footerHtml() +
+      "</main>");
+
+    animateCount(document.getElementById("hero-counter"), changed);
+    initHeroField(document.getElementById("hero-canvas"));
+  }
+
+/* =========================================================================
+   5a2. CHANGES VIEW — the /api/changes monitoring feed as its own section.
+   ========================================================================= */
+  async function renderChangesView() {
+    setView("changes", "<main>" + loadingHtml("the monitoring feed") + "</main>");
+    let data;
+    try {
+      data = await fetchChanges();
+    } catch (err) {
+      setView("changes", '<main class="view-enter">' + errorHtml(err, route) + footerHtml() + "</main>");
+      return;
+    }
+    if (!data) { // DEMO mode: no monitor stamps to show, and none worth inventing
+      setView("changes", '<main class="view-enter">' +
+        '<p class="status-note">The monitoring feed needs the live API (no server responding at /api/changes).</p>' +
+        footerHtml() + "</main>");
+      return;
+    }
+    const rows = data.rows || [];
+    setView("changes",
+      '<main class="view-enter">' +
+        '<section class="masthead view-head">' +
+          '<p class="eyebrow">Registry change monitor — feed</p>' +
+          "<h1>What the monitor has seen</h1>" +
+          '<p class="tagline">' + (data.asOf
+            ? "Last learned something on " + escapeHtml(String(data.asOf).slice(0, 10)) + "."
+            : "No monitor pass has run against this corpus yet.") + "</p>" +
+        "</section>" +
+        (rows.length
+          ? '<ul class="changes-list">' + changesRowsHtml(rows) + "</ul>" +
+            // ponytail: first page only; add a pager when a corpus actually accrues >50 monitored findings
+            (data.total > rows.length
+              ? '<p class="status-note">Showing the ' + rows.length + " most recently seen of " + data.total + ".</p>"
+              : "")
+          : '<p class="status-note">Findings appear here when a monitor pass sees a registry change happen. ' +
+            "The historical corpus carries no discovery dates by design &mdash; those changes predate the monitor.</p>") +
+        footerHtml() +
+      "</main>");
+  }
+
+/* =========================================================================
+   5a3. TRIALS VIEW — the filterable ledger (was the index view's lower half).
+   ========================================================================= */
+  async function renderTrialsView(initialParams) {
+    setView("trials", "<main>" + loadingHtml("the trial index") + "</main>");
     indexSort = { key: "daysAfterEnrolment", dir: -1 };
     indexFilters = { severity: new Set(), changeType: new Set(), sponsorClass: new Set(), phase: new Set() };
     indexQuery = "";
     indexSponsorFilter = "";
+    indexOffset = 0;
     // Drill-down from the analytics view: one filter key (severity/changeType/
-    // sponsorClass/phase) or the exact-match `sponsor` param preset before the first fetch.
+    // sponsorClass/phase) or the exact-match `sponsor` param preset before the first
+    // fetch. The hash is read once, as initial state -- token edits after that change
+    // the ledger, not the URL.
     if (initialParams) {
-      ["severity", "changeType", "sponsorClass", "phase"].forEach((key) => {
+      FILTER_DEFS.forEach(([key]) => {
         initialParams.getAll(key).forEach((v) => indexFilters[key].add(v));
       });
       indexQuery = initialParams.get("q") || "";
       indexSponsorFilter = initialParams.get("sponsor") || "";
     }
 
-    const data = await fetchIndex({});
-    const allRows = data.rows;
-    const counts = data.counts;
+    // Two requests, in parallel: the chrome and the first page. Neither waits on the
+    // other, and neither pulls all 721 rows down to render a masthead number.
+    let meta, page;
+    try {
+      [meta, page] = await Promise.all([fetchMeta(), fetchIndex(currentIndexParams())]);
+    } catch (err) {
+      setView("trials", '<main class="view-enter">' + errorHtml(err, route) + footerHtml() + "</main>");
+      return;
+    }
 
-    const filterDefs = [
-      ["severity", "Severity"], ["changeType", "Change"], ["sponsorClass", "Sponsor class"], ["phase", "Phase"]
-    ];
-    const chipsHtml = filterDefs.map(([key, label]) => {
-      const values = [...new Set(allRows.map((r) => r[key]).filter((v) => v !== null && v !== undefined))].sort();
-      const chips = values.map((v) => {
-        const text = key === "phase" ? phaseLabel(v) : v;
-        const pressed = indexFilters[key].has(v);
-        return '<button class="chip" data-filter-key="' + key + '" data-filter-value="' + escapeHtml(v) +
-               '" aria-pressed="' + pressed + '">' + escapeHtml(text) + "</button>";
-      }).join("");
-      return '<div class="filter-group"><span class="filter-label">' + label + "</span>" + chips + "</div>";
-    }).join("");
+    const counts = meta.counts || {};
+    corpusCaveat = counts.caveat || null;
 
-    const changedCount = counts.signalTrials;
-
-    // Exact-match sponsor filter has no chip (it's not a fixed small vocabulary like
-    // severity/class/phase) -- shown as its own clearable badge instead when active.
-    const sponsorFilterHtml = indexSponsorFilter
-      ? '<div class="filter-group"><span class="filter-label">Sponsor</span>' +
-          '<span class="chip sponsor-chip" aria-pressed="true">' + escapeHtml(indexSponsorFilter) +
-            ' <a href="#/" aria-label="Clear sponsor filter">&times;</a></span>' +
-        "</div>"
-      : "";
-
-    app.innerHTML =
-      topbarHtml() +
-      '<main class="index-view">' +
-        '<section class="masthead">' +
+    setView("trials",
+      '<main class="view-enter index-view">' +
+        '<section class="masthead view-head">' +
           '<p class="eyebrow">Registry change monitor — index</p>' +
-          "<h1><span class=\"counter\">" + changedCount + "</span> trial" + (changedCount === 1 ? "" : "s") +
-            " changed " + (changedCount === 1 ? "its" : "their") + " primary outcome after enrolment began</h1>" +
-          '<p class="tagline">Every version below was public the entire time. ' + escapeHtml(counts.caveat) + "</p>" +
+          "<h1>Trial index</h1>" +
+          '<p class="tagline"><span class="mono">' + (counts.signalTrials || 0) + "</span> flagged of " +
+            '<span class="mono">' + (counts.trials || 0) + "</span> monitored trials — every version below was public the entire time.</p>" +
         "</section>" +
-        caseStudiesHtml(allRows) +
-        '<section class="filters" role="group" aria-label="Filter trials">' + chipsHtml + sponsorFilterHtml +
-          '<div class="search-group">' +
-            '<span class="filter-label">Search</span>' +
-            '<input type="search" class="search-input" id="index-search" placeholder="NCT ID, sponsor, condition…" value="' +
-              escapeHtml(indexQuery) + '">' +
-          "</div>" +
-        "</section>" +
+        filterBarHtml(meta.filters || {}) +
+        '<div class="filter-tokens" id="filter-tokens"></div>' +
         '<div class="table-wrap"><table class="ledger" id="ledger">' +
           "<thead><tr>" +
             '<th data-sort="nctId">Trial<span class="sort-arrow"></span></th>' +
+            '<th data-sort="sponsor">Sponsor<span class="sort-arrow"></span></th>' +
             '<th data-sort="changeType">Change<span class="sort-arrow"></span></th>' +
-            '<th data-sort="severity">Severity<span class="sort-arrow"></span></th>' +
-            '<th data-sort="sponsorClass">Sponsor class<span class="sort-arrow"></span></th>' +
             '<th data-sort="phase">Phase<span class="sort-arrow"></span></th>' +
-            '<th data-sort="daysAfterEnrolment">Days after enrolment<span class="sort-arrow"></span></th>' +
+            '<th data-sort="daysAfterEnrolment">Timing<span class="sort-arrow"></span></th>' +
           "</tr></thead><tbody></tbody>" +
         "</table></div>" +
-      "</main>";
+        '<div class="ledger-foot">' +
+          '<nav class="pager" id="pager" aria-label="Ledger pages"></nav>' +
+          '<a class="export-link" id="export-link" hidden download>Download CSV</a>' +
+        "</div>" +
+        footerHtml() +
+      "</main>");
 
+    renderTokens();
     wireIndexInteractions();
-    const hasInitialFilter = indexQuery || indexSponsorFilter || Object.values(indexFilters).some((s) => s.size);
-    if (hasInitialFilter) await refreshLedger(); // drill-down from analytics: fetch filtered
-    else renderLedgerRows(allRows); // no filters active: identical to the filtered result
+    paintLedger(page);
   }
 
   function renderLedgerRows(rows) {
     const tbody = document.querySelector("#ledger tbody");
-    tbody.innerHTML = rows.length ? rows.map((s) =>
-      '<tr data-nct="' + s.nctId + '" tabindex="0">' +
-        '<td><span class="nct-link mono">' + s.nctId + "</span><br>" +
-          escapeHtml((s.conditions && s.conditions.length ? s.conditions.join(", ") : s.sponsor) || "") + "</td>" +
-        "<td>" + (s.changeType ? escapeHtml(s.changeType) : "—") + "</td>" +
-        "<td>" + (s.severity ? '<span class="tag severity-' + s.severity.toLowerCase() + '">' + s.severity + "</span>" : "—") + "</td>" +
-        "<td>" + (s.sponsorClass || "—") + "</td>" +
-        "<td>" + phaseLabel(s.phase) + "</td>" +
-        '<td class="mono">' + (s.daysAfterEnrolment != null ? fmtDaysAfterEnrolment(s.daysAfterEnrolment) : "—") + "</td>" +
-      "</tr>"
-    ).join("") : '<tr class="empty-row"><td colspan="6">No trials match the selected filters.</td></tr>';
+    tbody.innerHTML = rows.length ? rows.map((s, i) => {
+      const conditions = s.conditions && s.conditions.length ? s.conditions.join(", ") : "";
+      const severityTag = s.severity
+        ? ' <span class="tag severity-' + escapeHtml(s.severity.toLowerCase()) + '" title="' + escapeHtml(s.severity) +
+          '">' + escapeHtml(label("severity", s.severity)) + "</span>"
+        : "";
+      return (
+        '<tr data-nct="' + escapeHtml(s.nctId) + '" tabindex="0" style="--i:' + i + '">' +
+          '<td><span class="nct-link mono">' + escapeHtml(s.nctId) + "</span>" +
+            (conditions ? '<span class="cell-sub">' + escapeHtml(conditions) + "</span>" : "") + "</td>" +
+          "<td>" + escapeHtml(s.sponsor || "—") +
+            '<span class="cell-sub" title="' + escapeHtml(String(s.sponsorClass || "")) + '">' +
+              escapeHtml(label("sponsorClass", s.sponsorClass)) + "</span></td>" +
+          "<td>" + labelHtml("changeType", s.changeType, "cell-change") + severityTag + "</td>" +
+          "<td>" + escapeHtml(phaseLabel(s.phase)) + "</td>" +
+          // Humanized in the cell, exact in the tooltip: the column is read as prose,
+          // but the day count is the number anyone checking the record needs.
+          (s.daysAfterEnrolment != null
+            ? '<td title="' + escapeHtml(fmtDaysAfterEnrolment(s.daysAfterEnrolment)) + '">' +
+                escapeHtml(fmtTimingProse(s.daysAfterEnrolment)) + "</td>"
+            : "<td>—</td>") +
+        "</tr>"
+      );
+    }).join("") : '<tr class="empty-row"><td colspan="5">No trials match the selected filters.</td></tr>';
 
     tbody.querySelectorAll("tr[data-nct]").forEach((tr) => {
       const go = () => { location.hash = "#/trial/" + tr.dataset.nct; };
@@ -1152,17 +2031,35 @@
   }
 
   function wireIndexInteractions() {
-    // .sponsor-chip is a static "active filter" badge (cleared via its own <a>, not a
-    // toggle in indexFilters), so it's excluded here -- wiring it up would read
-    // indexFilters[undefined] (no data-filter-key) and throw on click.
-    document.querySelectorAll(".chip:not(.sponsor-chip)").forEach((chip) => {
-      chip.addEventListener("click", () => {
-        const { filterKey, filterValue } = chip.dataset;
-        const set = indexFilters[filterKey];
-        set.has(filterValue) ? set.delete(filterValue) : set.add(filterValue);
-        chip.setAttribute("aria-pressed", set.has(filterValue));
+    // Picking an option adds the filter and returns the select to its placeholder,
+    // so the select always reads as "add a filter", never as "the filter in force" --
+    // what's in force is the token row, which is where it can be removed.
+    document.querySelectorAll(".filter-select").forEach((select) => {
+      select.addEventListener("change", () => {
+        const value = select.value;
+        select.selectedIndex = 0;
+        if (!value) return;
+        indexFilters[select.dataset.filterKey].add(value);
+        renderTokens();
         refreshLedger();
       });
+    });
+    // Delegated: the token row is re-rendered on every change, so per-token listeners
+    // would have to be re-attached every time.
+    document.getElementById("filter-tokens").addEventListener("click", (e) => {
+      const token = e.target.closest(".token");
+      if (!token) return;
+      const { tokenKey, tokenValue } = token.dataset;
+      if (tokenKey === "sponsor") indexSponsorFilter = "";
+      else indexFilters[tokenKey].delete(tokenValue);
+      renderTokens();
+      refreshLedger();
+    });
+    document.getElementById("pager").addEventListener("click", (e) => {
+      const btn = e.target.closest(".pager-btn");
+      if (!btn || btn.disabled) return;
+      indexOffset = Math.max(0, indexOffset + (btn.dataset.page === "next" ? PAGE_SIZE : -PAGE_SIZE));
+      refreshLedger(false); // page turn: the only change that must NOT reset to page 1
     });
     document.querySelectorAll("#ledger th[data-sort]").forEach((th) => {
       th.addEventListener("click", () => {
@@ -1192,8 +2089,8 @@
        either via the numField/denField it's told to read.
 
        Drill-down (brief: "every sponsor/class/phase row clickable"): a row's
-       href is one filter encoded as an index-view query string (#/?phase=...),
-       parsed back out by route()/renderIndexView above. class/phase reuse the
+       href is one filter encoded as a trials-view query string (#/trials?phase=...),
+       parsed back out by route()/renderTrialsView above. class/phase reuse the
        existing chip filters; sponsor uses a dedicated exact-match `sponsor`
        param (fix round 1, task16-review.md Critical-1) rather than the
        free-text `q` search — `q` is a substring match across three columns, so
@@ -1225,7 +2122,7 @@
     );
   }
 
-  function analyticsTableHtml(sectionTitle, columnLabel, rows, keyField, numField, denField, drillHrefFn) {
+  function analyticsTableHtml(sectionTitle, caption, columnLabel, rows, keyField, numField, denField, drillHrefFn) {
     if (!rows || !rows.length) return "";
     // Rate-shape tables (sponsor/class/phase/year/condition): column 2 is the
     // group's own size, i.e. the bar's denominator (totalTrials). Count-shape
@@ -1237,11 +2134,14 @@
     const countLabel = isCountShape ? "Findings" : "Trials";
     const rateLabel = isCountShape ? "Share" : "Signal rate";
     const bodyRows = rows.map((r) => {
-      const href = drillHrefFn ? "#/?" + drillHrefFn(r) : null;
-      const label = keyField === "phase" ? phaseLabel(r[keyField]) : (r[keyField] ?? "—");
+      const href = drillHrefFn ? "#/trials?" + drillHrefFn(r) : null;
+      // keyField doubles as the label-map kind (severity/sponsorClass/concern/...);
+      // free-text keys (sponsor, condition, year, histogram bucket) have no map entry
+      // and pass through label() untouched.
+      const text = keyField === "phase" ? phaseLabel(r[keyField]) : label(keyField, r[keyField]);
       return (
         "<tr" + (href ? ' class="drill-row" data-href="' + href + '" tabindex="0"' : "") + ">" +
-          "<td>" + escapeHtml(String(label)) + "</td>" +
+          '<td title="' + escapeHtml(String(r[keyField] ?? "")) + '">' + escapeHtml(String(text)) + "</td>" +
           '<td class="mono">' + r[sizeField] + "</td>" +
           rateCellHtml(r[numField], r[denField], r.rate, r.lowN) +
         "</tr>"
@@ -1250,6 +2150,7 @@
     return (
       '<section class="analytics-table-section">' +
         '<h2 class="analytics-section-title">' + escapeHtml(sectionTitle) + "</h2>" +
+        (caption ? '<p class="analytics-caption">' + escapeHtml(caption) + "</p>" : "") +
         '<div class="table-wrap"><table class="ledger analytics-table">' +
           "<thead><tr><th>" + escapeHtml(columnLabel) + "</th><th>" + countLabel + "</th><th>" + rateLabel + "</th></tr></thead>" +
           "<tbody>" + bodyRows + "</tbody>" +
@@ -1259,18 +2160,25 @@
   }
 
   async function renderAnalyticsView() {
-    const app = document.getElementById("app");
-    app.innerHTML = topbarHtml() + '<main class="analytics-view"><p class="status-note">Loading analytics…</p></main>';
+    setView("analytics", "<main>" + loadingHtml("the analytics") + "</main>");
 
-    const data = await fetchAnalytics();
-    if (!data) {
-      app.innerHTML = topbarHtml() +
-        '<main class="analytics-view">' +
-          '<a class="back-link" href="#/">&larr; All trials</a>' +
-          '<p class="status-note">Analytics needs the live API (no server responding at /api/analytics).</p>' +
-        "</main>";
+    let data;
+    try {
+      data = await fetchAnalytics();
+    } catch (err) {
+      setView("analytics", '<main class="view-enter analytics-view">' + errorHtml(err, route) + footerHtml() + "</main>");
       return;
     }
+    if (!data) { // DEMO mode: no corpus to aggregate, and no numbers worth inventing
+      setView("analytics", '<main class="view-enter analytics-view">' +
+        '<p class="status-note">Analytics needs the live API (no server responding at /api/analytics).</p>' +
+        footerHtml() + "</main>");
+      return;
+    }
+
+    // The corpus caveat is the footer's job on every view now, so this one goes there
+    // instead of into a second tagline the reader has already read on the index.
+    corpusCaveat = data.caveat || corpusCaveat;
 
     const sponsorNote = data.signalRateBySponsor.length
       ? ""
@@ -1283,36 +2191,51 @@
         "prospectively and excluded from these rates until they accumulate version history.</p>"
       : "";
 
+    // Each caption names the denominator its rate is over, so no bar can be read
+    // against the wrong total.
+    const CORPUS = "completed, results-posted trials";
     const sections = [
-      analyticsTableHtml("Signal rate by sponsor (≥5 trials)", "Sponsor", data.signalRateBySponsor,
+      analyticsTableHtml("Signal rate by sponsor (≥5 trials)",
+        "Of this sponsor's " + CORPUS + " in the corpus, the share with a signal finding.",
+        "Sponsor", data.signalRateBySponsor,
         "sponsor", "signalTrials", "totalTrials", (r) => "sponsor=" + encodeURIComponent(r.sponsor)),
-      analyticsTableHtml("Signal rate by sponsor class", "Sponsor class", data.bySponsorClass,
+      analyticsTableHtml("Signal rate by sponsor class",
+        "Of all " + CORPUS + " in this sponsor class, the share with a signal finding.",
+        "Sponsor class", data.bySponsorClass,
         "sponsorClass", "signalTrials", "totalTrials", (r) => "sponsorClass=" + encodeURIComponent(r.sponsorClass)),
-      analyticsTableHtml("Signal rate by phase", "Phase", data.byPhase,
+      analyticsTableHtml("Signal rate by phase",
+        "Of all " + CORPUS + " in this phase, the share with a signal finding.",
+        "Phase", data.byPhase,
         "phase", "signalTrials", "totalTrials", (r) => "phase=" + encodeURIComponent(r.phase)),
-      analyticsTableHtml("Signal rate by year first posted", "Year", data.byYear,
+      analyticsTableHtml("Signal rate by year first posted",
+        "Of all " + CORPUS + " first posted that year, the share with a signal finding.",
+        "Year", data.byYear,
         "year", "signalTrials", "totalTrials", null),
-      analyticsTableHtml("Top conditions", "Condition", data.topConditions,
+      analyticsTableHtml("Top conditions",
+        "Of all " + CORPUS + " listing this condition, the share with a signal finding.",
+        "Condition", data.topConditions,
         "condition", "signalTrials", "totalTrials", null),
-      analyticsTableHtml("Timing of primary-outcome changes, relative to enrolment", "Days after enrolment", data.timingHistogram,
+      analyticsTableHtml("Timing of primary-outcome changes, relative to enrolment",
+        "Share of every finding in the corpus, signals and context alike, not of trials.",
+        "Days after enrolment", data.timingHistogram,
         "bucket", "count", "total", null),
-      analyticsTableHtml("Adjudication concern mix", "Concern level", data.adjudicationConcernMix,
+      analyticsTableHtml("Adjudication concern mix",
+        "Share of every adjudicated finding; findings the reviewer never returned a verdict on are excluded.",
+        "Concern level", data.adjudicationConcernMix,
         "concern", "count", "total", null),
     ].join("");
 
-    app.innerHTML =
-      topbarHtml() +
-      '<main class="analytics-view">' +
-        '<a class="back-link" href="#/">&larr; All trials</a>' +
-        '<section class="masthead">' +
+    setView("analytics",
+      '<main class="view-enter analytics-view">' +
+        '<section class="masthead view-head">' +
           '<p class="eyebrow">Registry change monitor — analytics</p>' +
           "<h1>Sponsor analytics</h1>" +
-          '<p class="tagline">' + escapeHtml(data.caveat) + "</p>" +
         "</section>" +
         ctisNote +
         sponsorNote +
         sections +
-      "</main>";
+        footerHtml() +
+      "</main>");
 
     document.querySelectorAll(".drill-row").forEach((tr) => {
       const go = () => { location.hash = tr.dataset.href; };
@@ -1402,13 +2325,47 @@
     );
   }
 
+  // The banner reads /api/trials/{nct}.headlineFinding verbatim -- the ranking that
+  // picked it is the API's (ctcm/api.py:_headline_key) and is deliberately not
+  // re-derived here, so the trial page and the ledger row can never disagree about
+  // which finding is the headline. Red is spent on the Signal tag only: the frame
+  // stays rule-grey, because the changed record text is what's red in this brand.
+  function findingBannerHtml(hf) {
+    if (!hf) return "";
+    const severityTag = hf.severity
+      ? '<span class="tag severity-' + escapeHtml(hf.severity.toLowerCase()) + '" title="' + escapeHtml(hf.severity) +
+        '">' + escapeHtml(label("severity", hf.severity)) + "</span>"
+      : "";
+    const timing = hf.daysAfterEnrolment != null
+      ? '<span class="finding-timing" title="' + escapeHtml(fmtDaysAfterEnrolment(hf.daysAfterEnrolment)) + '">' +
+          escapeHtml(fmtTimingProse(hf.daysAfterEnrolment)) + "</span>"
+      : "";
+    return (
+      '<section class="finding-banner" aria-label="Headline finding">' +
+        severityTag +
+        labelHtml("changeType", hf.changeType, "finding-change") +
+        timing +
+        (hf.rationale ? '<p class="finding-rationale">' + escapeHtml(rationaleProse(hf.rationale)) + "</p>" : "") +
+        adjudicationLineHtml(hf.adjudication) +
+      "</section>"
+    );
+  }
+
   async function renderTrialView(nctId) {
-    const app = document.getElementById("app");
-    const trial = await getTrial(nctId);
+    setView("trials", "<main>" + loadingHtml(nctId) + "</main>");
+
+    let trial;
+    try {
+      trial = await getTrial(nctId);
+    } catch (err) {
+      setView("trials", '<main class="view-enter trial-view"><a class="back-link" href="#/trials">&larr; Trial index</a>' +
+        errorHtml(err, route) + footerHtml() + "</main>");
+      return;
+    }
     if (!trial) {
-      app.innerHTML = topbarHtml() +
-        '<main><a class="back-link" href="#/">&larr; All trials</a>' +
-        '<p class="status-note">No trial found for ' + escapeHtml(nctId) + ".</p></main>";
+      setView("trials", '<main class="view-enter"><a class="back-link" href="#/trials">&larr; Trial index</a>' +
+        '<p class="status-note">No trial found for ' + escapeHtml(nctId) + ".</p>" +
+        footerHtml() + "</main>");
       return;
     }
 
@@ -1426,10 +2383,9 @@
     const enrolPct = trial.enrolmentStart ? refLinePercent(trial.enrolmentStart, trial.versions) : null;
     const compPct = trial.primaryCompletion ? refLinePercent(trial.primaryCompletion, trial.versions) : null;
 
-    app.innerHTML =
-      topbarHtml() +
-      '<main class="trial-view">' +
-        '<a class="back-link" href="#/">&larr; All trials</a>' +
+    setView("trials",
+      '<main class="view-enter trial-view">' +
+        '<a class="back-link" href="#/trials">&larr; Trial index</a>' +
         '<div class="trial-header">' +
           '<div class="trial-id-row">' +
             '<span class="nct-id mono">' + trial.nctId + "</span>" +
@@ -1444,8 +2400,12 @@
               (trial.enrolmentStartType ? " (" + trial.enrolmentStartType.toLowerCase() + ")" : "") + "</span>" +
             "<span>Primary completion <strong class=\"mono\">" + (trial.primaryCompletion || "unknown") + "</strong>" +
               (trial.primaryCompletionType ? " (" + trial.primaryCompletionType.toLowerCase() + ")" : "") + "</span>" +
+            '<span><a class="mono" href="' + trial.historyUrl + '" target="_blank" rel="noopener">' +
+              "clinicaltrials.gov/study/" + escapeHtml(trial.nctId) + "</a></span>" +
           "</div>" +
         "</div>" +
+
+        findingBannerHtml(trial.headlineFinding) +
 
         '<section class="scrubber" aria-label="Version scrubber">' +
           '<div class="scrubber-scroll"><div class="scrubber-track">' +
@@ -1457,18 +2417,26 @@
           "</div></div>" +
         "</section>" +
 
-        '<div class="readout">' +
+        // aria-live: the version can change from the track, the arrow keys or the
+        // stepper, and only the readout says which version you landed on.
+        '<div class="readout" aria-live="polite">' +
+          '<button class="stepper" id="step-prev" aria-label="Previous version">&lsaquo;</button>' +
           '<span class="readout-version mono" id="readout-version"></span>' +
+          '<button class="stepper" id="step-next" aria-label="Next version">&rsaquo;</button>' +
           '<span class="readout-date mono" id="readout-date"></span>' +
           '<span class="readout-days mono" id="readout-days"></span>' +
+          '<span class="readout-reslink" id="readout-reslink"></span>' +
           '<span class="readout-status" id="readout-status"></span>' +
         "</div>" +
+
+        '<p class="diff-legend"><del>struck</del> = removed · <ins>underlined</ins> = added</p>' +
 
         '<div class="outcome-panel">' +
           '<div class="card primary-card">' +
             '<p class="card-label">Primary outcome</p>' +
             '<p class="primary-measure" id="primary-measure"></p>' +
             '<p class="primary-timeframe mono" id="primary-timeframe"></p>' +
+            '<p class="change-stamp" id="change-stamp"></p>' +
             '<p class="primary-description" id="primary-description"></p>' +
             '<div class="primary-extra" id="primary-extra" hidden></div>' +
             '<p class="deep-links" id="deep-links"></p>' +
@@ -1483,7 +2451,8 @@
           "</div>" +
         "</div>" +
         publishedReportsHtml(trial) +
-      "</main>";
+        footerHtml() +
+      "</main>");
 
     initScrubber(trial);
   }
@@ -1493,21 +2462,32 @@
     const track = document.querySelector(".scrubber-track");
     const playhead = document.getElementById("playhead");
     const nodeButtons = [...track.querySelectorAll(".v-node")];
+    const stepPrev = document.getElementById("step-prev");
+    const stepNext = document.getElementById("step-next");
     let idx = 0;
 
     function select(i, opts) {
       idx = Math.max(0, Math.min(n - 1, i));
       nodeButtons.forEach((b, j) => b.setAttribute("aria-pressed", j === idx));
-      playhead.style.left = nodePercent(idx, n) + "%";
+      // While dragging, the playhead belongs to the pointer (see below) — moving it
+      // to the node here would make it snap away from the cursor mid-drag.
+      if (!dragging) playhead.style.left = nodePercent(idx, n) + "%";
+      stepPrev.disabled = idx === 0;
+      stepNext.disabled = idx === n - 1;
       renderOutcomePanel(trial, idx);
       if (opts && opts.focus) nodeButtons[idx].focus();
     }
 
     nodeButtons.forEach((b, i) => b.addEventListener("click", () => select(i)));
+    stepPrev.addEventListener("click", () => select(idx - 1));
+    stepNext.addEventListener("click", () => select(idx + 1));
 
-    function xToIndex(clientX) {
+    function xToPercent(clientX) {
       const rect = track.getBoundingClientRect();
-      const pct = ((clientX - rect.left) / rect.width) * 100;
+      return ((clientX - rect.left) / rect.width) * 100;
+    }
+
+    function nearestIndex(pct) {
       let best = 0, bestDist = Infinity;
       trial.versions.forEach((_, i) => {
         const d = Math.abs(nodePercent(i, n) - pct);
@@ -1516,15 +2496,29 @@
       return best;
     }
 
+    // Dragging: the playhead tracks the pointer 1:1 (clamped to the track's padded
+    // range) while the selected version switches at the midpoint between nodes; on
+    // release the playhead settles onto the selected node.
     let dragging = false;
+    function dragTo(clientX) {
+      const pct = xToPercent(clientX);
+      playhead.style.left = Math.max(nodePercent(0, n), Math.min(nodePercent(n - 1, n), pct)) + "%";
+      const near = nearestIndex(pct);
+      if (near !== idx) select(near);
+    }
     track.addEventListener("pointerdown", (e) => {
       dragging = true;
+      track.classList.add("dragging");
       track.setPointerCapture(e.pointerId);
-      select(xToIndex(e.clientX));
+      dragTo(e.clientX);
     });
-    track.addEventListener("pointermove", (e) => { if (dragging) select(xToIndex(e.clientX)); });
-    track.addEventListener("pointerup", () => { dragging = false; });
-    track.addEventListener("pointercancel", () => { dragging = false; });
+    track.addEventListener("pointermove", (e) => { if (dragging) dragTo(e.clientX); });
+    ["pointerup", "pointercancel"].forEach((ev) => track.addEventListener(ev, () => {
+      if (!dragging) return;
+      dragging = false;
+      track.classList.remove("dragging");
+      playhead.style.left = nodePercent(idx, n) + "%";
+    }));
 
     activeScrubber = {
       next: () => select(idx + 1, { focus: true }),
@@ -1548,6 +2542,26 @@
     return "";
   }
 
+  // "CHANGED 6 DECEMBER 2012 · 238 DAYS BEFORE THE TRIAL ENDED · WHILE STILL RUNNING"
+  // — the provenance stamp shown under the primary outcome on any version a SIGNAL
+  // finding points at. Uppercasing comes from the metadata voice CSS, not the string.
+  const MONTHS = ["January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December"];
+  const RUNNING_STATUSES = new Set(["RECRUITING", "ACTIVE_NOT_RECRUITING", "ENROLLING_BY_INVITATION"]);
+
+  function changeStampText(finding, versionDate, overallStatus) {
+    const [y, m, d] = versionDate.split("-").map(Number);
+    const parts = ["Changed " + d + " " + MONTHS[m - 1] + " " + y];
+    const dpc = finding.daysAfterPrimaryCompletion;
+    if (dpc != null && dpc !== 0) {
+      parts.push(Math.abs(dpc) + " days " + (dpc < 0 ? "before" : "after") + " the trial ended");
+    }
+    if (dpc != null && dpc <= 0 && RUNNING_STATUSES.has(overallStatus)) {
+      parts.push("while still running");
+    }
+    return parts.join(" · ");
+  }
+
   function diffSecondaryList(prevList, curList) {
     const prevMeasures = new Set((prevList || []).map((o) => o.measure));
     const removed = (prevList || []).filter((o) => !curList.some((c) => c.measure === o.measure));
@@ -1565,15 +2579,32 @@
     const daysEl = document.getElementById("readout-days");
     daysEl.textContent = daysAfterEnrolment != null ? fmtDaysAfterEnrolment(daysAfterEnrolment) : "enrolment date unknown";
     daysEl.className = "readout-days mono " + (daysAfterEnrolment != null ? timingClass(daysAfterEnrolment, daysAfterCompletion) : "");
-    const statusText = cur.overallStatus ? cur.overallStatus.replace(/_/g, " ") : "—";
-    document.getElementById("readout-status").textContent = statusText;
-    document.getElementById("status-pill").textContent = statusText;
+    const statusText = label("status", cur.overallStatus);
+    [document.getElementById("readout-status"), document.getElementById("status-pill")].forEach((el) => {
+      el.textContent = statusText;
+      el.title = cur.overallStatus || "";
+    });
 
     const curP = cur.primaryOutcomes[0] || { measure: "—", description: "", timeFrame: "—" };
     const prevP = prev ? (prev.primaryOutcomes[0] || { measure: "", description: "", timeFrame: "" }) : null;
     document.getElementById("primary-measure").innerHTML = renderDiff(prevP && prevP.measure, curP.measure);
     document.getElementById("primary-timeframe").innerHTML = renderDiff(prevP && prevP.timeFrame, curP.timeFrame);
     document.getElementById("primary-description").innerHTML = renderDiff(prevP && prevP.description, curP.description);
+
+    // "results-posting edit": this version is the to_version of a results-linked
+    // finding (ctcm/reslink.py) -- the edit coincides with the sponsor posting
+    // results, registry restructuring rather than an outcome switch. resultsLinked
+    // is true/false/null from the API (null = undetermined -> no tag, same as false);
+    // DEMO's TRIAL_DATA carries no findings array, so this stays empty there.
+    const resultsLinkedHere = (trial.findings || []).some((f) => f.resultsLinked === true && f.toVersion === cur.version);
+    document.getElementById("readout-reslink").textContent = resultsLinkedHere ? "results-posting edit" : "";
+
+    // Provenance stamp: which SIGNAL finding, if any, lands on this exact version.
+    const stampEl = document.getElementById("change-stamp");
+    const stampFinding = (trial.findings || []).find(
+      (f) => f.toVersion === cur.version && f.severity === "SIGNAL");
+    stampEl.textContent = stampFinding ? changeStampText(stampFinding, cur.date, cur.overallStatus) : "";
+    stampEl.classList.toggle("visible", !!stampFinding);
 
     const extraEl = document.getElementById("primary-extra");
     const extras = cur.primaryOutcomes.slice(1);
@@ -1590,7 +2621,7 @@
     document.getElementById("secondary-count").textContent = cur.secondaryOutcomes.length;
     document.getElementById("secondary-list").innerHTML = cur.secondaryOutcomes.map((o) =>
       '<li class="' + (isNew(o) ? "is-new" : "") + '"><span class="sec-measure">' + escapeHtml(o.measure) +
-      '</span><span class="sec-timeframe mono">' + escapeHtml(o.timeFrame) + "</span></li>"
+      '</span><span class="sec-timeframe mono">' + escapeHtml(o.timeFrame || "") + "</span></li>"
     ).join("");
     const removedWrap = document.getElementById("secondary-removed");
     if (removed.length) {
@@ -1610,6 +2641,136 @@
         '<a href="' + trial.historyUrl + "&a=" + (cur.version + 1) + '#version-content-panel" target="_blank" rel="noopener">v' +
           cur.version + " · " + cur.date + " ↗</a>";
   }
+
+/* =========================================================================
+   7. MOTION (v0.8) — the dashboard's corpus field (three.js over CDN,
+      decorative only) and the one counted number. Everything here degrades to
+      the same static page: offline, no WebGL, or prefers-reduced-motion all
+      just mean "skip it".
+   ========================================================================= */
+  const REDUCED_MOTION = matchMedia("(prefers-reduced-motion: reduce)");
+
+  function animateCount(el, to) {
+    if (!el) return;
+    if (REDUCED_MOTION.matches || !(to > 1)) { el.textContent = to; return; }
+    const dur = 900;
+    const t0 = performance.now();
+    (function tick(t) {
+      const p = Math.min(1, (t - t0) / dur);
+      el.textContent = Math.round(to * (1 - Math.pow(1 - p, 3))); // ease-out cubic
+      if (p < 1) requestAnimationFrame(tick);
+    })(t0);
+  }
+
+  let heroFieldStop = null;  // route() calls this when the dashboard unmounts
+  let heroFieldTheme = null; // theme toggle calls this to re-read palette tokens
+
+  function themeToken(name) {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  }
+
+  // The corpus as drifting lines of the public record: short near-horizontal
+  // strokes — most in paper at low opacity, a few struck in Redline red, which
+  // keeps the brand rule (red = changed record) even in ornament.
+  async function initHeroField(canvas) {
+    let THREE;
+    try {
+      THREE = await import("https://cdn.jsdelivr.net/npm/three@0.161.0/build/three.module.js");
+    } catch (e) {
+      return; // offline or a blocked CDN: the hero stays a static panel
+    }
+    if (!canvas || !canvas.isConnected) return; // navigated away while the module loaded
+
+    let renderer;
+    try {
+      renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true, alpha: true });
+    } catch (e) {
+      return; // no WebGL context to be had — same static panel
+    }
+    renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 100);
+    camera.position.z = 11;
+
+    function strokes(count) {
+      const pos = new Float32Array(count * 6);
+      for (let i = 0; i < count; i++) {
+        const x = (Math.random() - 0.5) * 22;
+        const y = (Math.random() - 0.5) * 10;
+        const z = (Math.random() - 0.5) * 8;
+        const len = 0.35 + Math.random() * 1.1;
+        const tilt = (Math.random() - 0.5) * 0.12;
+        pos.set([x - len, y - len * tilt, z, x + len, y + len * tilt, z], i * 6);
+      }
+      const g = new THREE.BufferGeometry();
+      g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+      return g;
+    }
+    const paperMat = new THREE.LineBasicMaterial({ transparent: true, opacity: 0.16 });
+    const redMat = new THREE.LineBasicMaterial({ transparent: true, opacity: 0.5 });
+    const field = new THREE.Group();
+    field.add(new THREE.LineSegments(strokes(340), paperMat));
+    field.add(new THREE.LineSegments(strokes(46), redMat));
+    scene.add(field);
+
+    heroFieldTheme = () => {
+      paperMat.color.set(themeToken("--paper") || "#F5F1EA");
+      redMat.color.set(themeToken("--redline") || "#C4302B");
+      renderer.render(scene, camera);
+    };
+
+    function resize() {
+      const w = canvas.clientWidth, h = canvas.clientHeight;
+      if (!w || !h) return;
+      renderer.setSize(w, h, false);
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+    }
+    const ro = new ResizeObserver(() => { resize(); renderer.render(scene, camera); });
+    ro.observe(canvas);
+    resize();
+    heroFieldTheme();
+
+    function cleanup() {
+      ro.disconnect();
+      renderer.dispose();
+      heroFieldTheme = null;
+    }
+
+    if (REDUCED_MOTION.matches) { // one honest still frame, no loop
+      heroFieldStop = cleanup;
+      return;
+    }
+
+    let targetX = 0, targetY = 0;
+    const hero = canvas.parentElement;
+    hero.addEventListener("pointermove", (e) => {
+      const r = hero.getBoundingClientRect();
+      targetY = ((e.clientX - r.left) / r.width - 0.5) * 0.35;
+      targetX = ((e.clientY - r.top) / r.height - 0.5) * 0.2;
+    });
+
+    let raf;
+    function frame(t) {
+      const drift = t * 0.00003; // slow constant spin, plus pointer parallax
+      field.rotation.y += (drift + targetY - field.rotation.y) * 0.05;
+      field.rotation.x += (targetX - field.rotation.x) * 0.05;
+      redMat.opacity = 0.38 + 0.18 * Math.sin(t * 0.0012); // the red strokes breathe
+      renderer.render(scene, camera);
+      raf = requestAnimationFrame(frame);
+    }
+    raf = requestAnimationFrame(frame);
+    heroFieldStop = () => { cancelAnimationFrame(raf); cleanup(); };
+  }
+
+  // "/" focuses the ledger search wherever it's on screen — the one keyboard
+  // affordance every index-shaped app is expected to have.
+  window.addEventListener("keydown", (e) => {
+    if (e.key !== "/" || (e.target.closest && e.target.closest("input, select, textarea"))) return;
+    const search = document.getElementById("index-search");
+    if (search) { search.focus(); e.preventDefault(); }
+  });
 </script>
 </body>
 </html>

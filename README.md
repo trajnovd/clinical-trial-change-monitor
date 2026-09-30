@@ -24,11 +24,12 @@ tens of minutes to a few hours depending on registry rate-limiting, for the
 then picks that cache up, same as below.
 
 **UI:** `make serve` starts the API + UI at `http://127.0.0.1:8742/` — a
-timeline scrubber over any trial's outcome-measure history, plus a
+timeline scrubber over any trial's outcome-measure history, plus a paginated,
 filterable index of every finding with deep links to the registry's own
-`?tab=history` compare pages.
+`?tab=history` compare pages, CSV export of any filtered view
+(`/api/export.csv`), and interactive API docs at `/docs`.
 
-**Tests:** `make test` (148 tests, `pytest -q`).
+**Tests:** `make test` (235 tests, `pytest -q`).
 
 `make adjudicate` (multi-agent LLM review of SIGNAL findings) and `make
 benchmark` (scores findings against the Holst ground truth) both call out to
